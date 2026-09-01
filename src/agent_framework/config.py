@@ -90,8 +90,8 @@ class AgentConfig:
     cdp_endpoint: str = field(
         default_factory=lambda: os.getenv("CDP_ENDPOINT", "http://127.0.0.1:9222")
     )
-    action_timeout_ms: int = 4_000
-    page_load_timeout_ms: int = 5_000
+    action_timeout_ms: int = 10_000
+    page_load_timeout_ms: int = 30_000
 
     # ── Safety ─────────────────────────────────────────────────────
     block_purchase_urls: list[str] = field(

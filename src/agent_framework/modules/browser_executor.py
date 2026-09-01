@@ -95,6 +95,7 @@ class BrowserExecutor:
         self._context = None
         self._page = None
         self._is_started = False
+        self._is_cdp = False
         # Selector cache: description → CSS selector
         self._selector_cache: dict[str, str] = {}
         self._last_extracted_items: list[dict[str, Any]] = []
