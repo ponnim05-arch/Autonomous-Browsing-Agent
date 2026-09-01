@@ -94,8 +94,22 @@ LLM_MODEL=gemini-2.0-flash
 SERPAPI_KEY=your_serpapi_key_here
 
 # Browser Settings
+# Type: chromium | msedge | chrome | firefox | webkit
+BROWSER_TYPE=chromium
 HEADLESS=false
+
+# Connection Mode: playwright (dedicated clean browser) | cdp (existing Chrome via remote debugging)
+BROWSER_CONNECTION_MODE=playwright
+CDP_ENDPOINT=http://127.0.0.1:9222
 ```
+
+### Browser Execution Modes
+- **Dedicated Playwright Mode (Default):** Launches a separate, clean browser instance with resilient fallback cascading (Requested Browser -> Microsoft Edge -> Google Chrome -> Bundled Chromium).
+- **Chrome DevTools Protocol (CDP) Mode:** Connects to an existing Chrome instance started with `--remote-debugging-port=9222`:
+  ```bash
+  # Start Chrome with remote debugging enabled
+  chrome.exe --remote-debugging-port=9222 --user-data-dir="C:\temp\chrome_dev_profile"
+  ```
 
 ---
 

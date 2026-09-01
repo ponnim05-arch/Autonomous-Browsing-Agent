@@ -84,6 +84,12 @@ class AgentConfig:
     browser_type: str = field(
         default_factory=lambda: os.getenv("BROWSER_TYPE", "chromium")
     )
+    browser_connection_mode: str = field(
+        default_factory=lambda: os.getenv("BROWSER_CONNECTION_MODE", "playwright").lower()
+    )
+    cdp_endpoint: str = field(
+        default_factory=lambda: os.getenv("CDP_ENDPOINT", "http://127.0.0.1:9222")
+    )
     action_timeout_ms: int = 4_000
     page_load_timeout_ms: int = 5_000
 

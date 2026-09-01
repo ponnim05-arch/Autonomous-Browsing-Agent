@@ -47,7 +47,13 @@ from agent_framework.modules.logger import ExperimentLogger
 from agent_framework.modules.unified_planner import UnifiedPlanner, ExecutionPlan
 from agent_framework.modules.state_manager import StateManager
 from agent_framework.modules.metrics import MetricsCollector
-from agent_framework.models import RepairInput, ActionObject, GoalObject, SubTask
+from agent_framework.modules.browser_executor import (
+    BrowserExecutor,
+    BrowserError,
+    BrowserBlockedError,
+    BrowserNotStartedError,
+    BrowserStartupError,
+)
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -73,17 +79,30 @@ exp_logger = ExperimentLogger(config)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def run_async(coro):
-    """Run an async coroutine from Streamlit's sync context."""
+    """Run an async coroutine safely from Streamlit's sync context without leaving active event loops."""
     try:
-        loop = asyncio.get_event_loop()
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
         if loop.is_running():
             import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                def _worker():
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    try:
+                        return new_loop.run_until_complete(coro)
+                    finally:
+                        new_loop.close()
+                future = pool.submit(_worker)
                 return future.result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+        else:
+            return loop.run_until_complete(coro)
+    except Exception:
+        raise
 
 
 def strategy_badge(strategy: str) -> str:
@@ -111,9 +130,16 @@ with st.sidebar:
     st.divider()
     st.caption(f"Fast Model: `{config.fast_model}`")
     st.caption(f"Reasoning Model: `{config.reasoning_model}`")
-    st.caption(f"Browser: `{config.browser_type}`")
+    st.caption(f"Browser: `{config.browser_type}` ({config.browser_connection_mode})")
     st.caption(f"Batch Execution: `{'Enabled' if config.enable_batch_execution else 'Disabled'}`")
     st.caption(f"Storage: `{config.storage_backend}`")
+
+    with st.expander("🛠️ Environment & Diagnostics"):
+        diag = BrowserExecutor.get_diagnostics(config)
+        st.write(f"**Python:** `{diag['python_version']}`")
+        st.write(f"**Playwright:** `{diag['playwright_version'] or 'Not installed'}`")
+        st.write(f"**Framework Src:** `{'Local src' if diag['is_local_src'] else 'site-packages'}`")
+        st.code(diag['agent_framework_path'], language="text")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -162,6 +188,22 @@ if page == "🏠 Home":
             ["chromium", "msedge", "chrome", "firefox", "webkit"],
             index=0,
         )
+        conn_mode_choice = st.selectbox(
+            "Connection Mode",
+            [
+                "playwright (Dedicated Browser Instance)",
+                "cdp (Connect to existing Chrome via CDP)",
+            ],
+            index=0,
+            help="Playwright launches a clean, separate browser. CDP connects to Chrome already running with --remote-debugging-port.",
+        )
+        cdp_endpoint = "http://127.0.0.1:9222"
+        if "cdp" in conn_mode_choice:
+            cdp_endpoint = st.text_input(
+                "CDP Endpoint",
+                value="http://127.0.0.1:9222",
+                help="Start Chrome with: chrome.exe --remote-debugging-port=9222",
+            )
         headless = st.checkbox("Background / Headless browser", value=False, help="Run browser completely in the background without opening a visible window")
         api_key_override = st.text_input(
             "API Key (Optional override)",
@@ -174,6 +216,7 @@ if page == "🏠 Home":
 
     if st.button("▶ Plan & Queue Task", type="primary", use_container_width=True):
         clean_model = model_choice.split(" ")[0].strip()
+        clean_conn = "cdp" if "cdp" in conn_mode_choice else "playwright"
 
         # Determine provider from model
         if any(k in clean_model for k in ("meta/", "mistralai/", "nvidia", "openai/gpt-oss")):
@@ -191,6 +234,8 @@ if page == "🏠 Home":
         os.environ["REASONING_MODEL"] = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
         os.environ["EXPERIMENT_STRATEGY"] = clean_strategy
         os.environ["BROWSER_TYPE"] = browser_choice
+        os.environ["BROWSER_CONNECTION_MODE"] = clean_conn
+        os.environ["CDP_ENDPOINT"] = cdp_endpoint
         os.environ["HEADLESS"] = str(headless).lower()
 
         if api_key_override.strip():
@@ -528,8 +573,31 @@ elif page == "🤖 Agent View":
                 ))
                 progress.progress(1.0, text=f"✅ Task Completed in {elapsed:.1f}s!")
 
+            except BrowserStartupError as bse:
+                st.error(f"❌ **Browser Startup Failed:** {bse}")
+                diag = bse.diagnostics
+                with st.expander("🛠️ Browser Diagnostics & Troubleshooting", expanded=True):
+                    st.markdown(f"**Browser Type:** `{diag.get('browser_type', run_config.browser_type)}` | **Mode:** `{diag.get('browser_connection_mode', 'playwright')}` | **Headless:** `{diag.get('headless', run_config.headless)}`")
+                    st.markdown(f"**Playwright Available:** `{diag.get('playwright_available')}` (`{diag.get('playwright_version', 'N/A')}`)")
+                    st.markdown(f"**Framework Location:** `{diag.get('agent_framework_path')}` (`{'Local src' if diag.get('is_local_src') else 'Installed site-packages'}`)")
+                    if diag.get("attempted_launchers"):
+                        st.markdown(f"**Attempted Launchers:** {', '.join(diag.get('attempted_launchers'))}")
+                    if bse.suggested_fix:
+                        st.info(f"💡 **Suggested Fix:** {bse.suggested_fix}")
+                run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
+
+            except BrowserNotStartedError as bne:
+                st.error(f"❌ **Browser Lifecycle Error:** {bne}")
+                st.info("💡 **Fix:** Ensure the browser is managed inside an `async with BrowserExecutor(config) as browser:` context.")
+                run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
+
+            except BrowserBlockedError as bbe:
+                st.error(f"🛑 **Navigation Blocked:** {bbe}")
+                st.warning("Action was blocked by safe browsing guardrails (e.g. checkout or payment URL).")
+                run_async(exp_logger.end_run(run_id, "blocked", 0, 0, 0, 0))
+
             except Exception as e:
-                st.error(f"❌ Agent execution error: {e}")
+                st.error(f"❌ **Agent Execution Error:** {e}")
                 run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
 
         # Show Performance Scorecard if metrics are available

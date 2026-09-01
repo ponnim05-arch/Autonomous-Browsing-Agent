@@ -1,14 +1,18 @@
 """
-Module 5 — Browser Executor (Optimized)
-=========================================
-Executes browser actions using Playwright (async Chromium).
+Module 5 — Browser Executor (Optimized & Resilient)
+===================================================
+Executes browser actions using Playwright (async Chromium/Chrome/Edge/WebKit/Firefox)
+or optional Chrome DevTools Protocol (CDP) connection.
 
-Optimizations over original:
-- Batch execution: execute multiple actions without LLM between them
-- Selector caching: memoize successful CSS selectors
-- Smart waits: use wait_for_selector / wait_for_load_state instead of sleep
-- Checkpoint-only screenshots: only capture at validation points
-- Multi-strategy element resolution with priority fallback
+Optimizations & Capabilities:
+- Explicit, reliable context manager lifecycle (__aenter__ / __aexit__)
+- Multi-tier cascading fallback launcher (Requested -> Edge -> Chrome -> Bundled Chromium)
+- Optional CDP support (connect to existing browser on --remote-debugging-port)
+- In-flight health checks and automatic page/context self-recovery
+- Multi-strategy element resolution (cached CSS -> CSS -> aria-label -> placeholder -> text -> role)
+- Smart waits (wait_for_load_state / DOMContentLoaded) instead of fixed sleeps
+- Safe URL normalization & purchase blocklist enforcement
+- Comprehensive runtime diagnostics and actionable error messages
 
 Pipeline position: ActionObject[] -> raw page state (dict)
 """
@@ -16,6 +20,7 @@ Pipeline position: ActionObject[] -> raw page state (dict)
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import sys
 import time
@@ -39,19 +44,48 @@ _USER_AGENT = (
 )
 
 
-class BrowserBlockedError(Exception):
+# ── Exceptions ───────────────────────────────────────────────────────────────
+
+class BrowserError(Exception):
+    """Base exception for all browser executor errors."""
+
+
+class BrowserBlockedError(BrowserError):
     """Raised when navigation is blocked by safety guardrails."""
 
+
+class BrowserNotStartedError(BrowserError):
+    """Raised when an operation is attempted on an uninitialized browser."""
+
+
+class BrowserStartupError(BrowserError):
+    """Raised when browser initialization fails with rich diagnostic details."""
+
+    def __init__(
+        self,
+        message: str,
+        diagnostics: dict[str, Any] | None = None,
+        suggested_fix: str | None = None,
+    ):
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+        self.suggested_fix = (
+            suggested_fix
+            or "Run 'python -m playwright install chromium' or ensure a supported browser is installed."
+        )
+
+
+# ── BrowserExecutor ──────────────────────────────────────────────────────────
 
 class BrowserExecutor:
     """
     Module 5: Manages Playwright browser lifecycle and executes ActionObjects.
 
     Usage (async context manager):
-        async with BrowserExecutor(config) as executor:
-            raw_state = await executor.execute(action, run_id, step_index)
+        async with BrowserExecutor(config) as browser:
+            raw_state = await browser.execute(action, run_id, step_index)
             # Or batch execute:
-            results = await executor.execute_batch(actions, run_id, start_step)
+            results = await browser.execute_batch(actions, run_id, start_step)
     """
 
     def __init__(self, config: AgentConfig = default_config):
@@ -60,21 +94,150 @@ class BrowserExecutor:
         self._browser = None
         self._context = None
         self._page = None
+        self._is_started = False
+        self._is_cdp = False
         # Selector cache: description → CSS selector
         self._selector_cache: dict[str, str] = {}
 
-    # ── Lifecycle ─────────────────────────────────────────────────
+    # ── Diagnostics ───────────────────────────────────────────────────────────
+
+    @classmethod
+    def get_diagnostics(cls, config: AgentConfig | None = None) -> dict[str, Any]:
+        """
+        Inspect the execution environment, module import origins, and Playwright status.
+        Helpful for troubleshooting stale packages, wrong venvs, or missing binaries.
+        """
+        cfg = config or default_config
+        try:
+            framework_path = inspect.getfile(cls)
+        except Exception:
+            framework_path = __file__
+
+        is_local_src = "site-packages" not in framework_path.replace("\\", "/")
+
+        pw_available = async_playwright is not None
+        pw_version = None
+        pw_module_path = None
+        if pw_available:
+            try:
+                import importlib.metadata
+                pw_version = importlib.metadata.version("playwright")
+            except Exception:
+                pw_version = "installed"
+            try:
+                import playwright
+                pw_module_path = inspect.getfile(playwright)
+            except Exception:
+                pw_module_path = "unknown"
+
+        return {
+            "python_executable": sys.executable,
+            "python_version": sys.version.split()[0],
+            "agent_framework_path": framework_path,
+            "is_local_src": is_local_src,
+            "playwright_available": pw_available,
+            "playwright_version": pw_version,
+            "playwright_module_path": pw_module_path,
+            "browser_type": cfg.browser_type,
+            "browser_connection_mode": getattr(cfg, "browser_connection_mode", "playwright"),
+            "headless": cfg.headless,
+            "cdp_endpoint": getattr(cfg, "cdp_endpoint", "http://127.0.0.1:9222"),
+        }
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def __aenter__(self) -> "BrowserExecutor":
-        await self.start()
-        return self
+        try:
+            await self.start()
+            return self
+        except Exception:
+            await self.stop()
+            raise
 
     async def __aexit__(self, *_) -> None:
         await self.stop()
 
     async def start(self) -> None:
-        """Launch Playwright browser and create a stealth context with background execution flags."""
-        self._playwright = await async_playwright().start()
+        """
+        Initialize Playwright -> Browser -> Context -> Page (or connect via CDP).
+        Guarantees that all required browser resources are initialized or raises BrowserStartupError.
+        """
+        if self._is_started and self._page and not self._page.is_closed():
+            logger.debug("[M5] BrowserExecutor already running and healthy.")
+            return
+
+        if async_playwright is None:
+            diag = self.get_diagnostics(self.config)
+            raise BrowserStartupError(
+                "Playwright is not installed in the active Python environment.",
+                diagnostics=diag,
+                suggested_fix="Install Playwright with: pip install playwright && python -m playwright install chromium",
+            )
+
+        connection_mode = (
+            getattr(self.config, "browser_connection_mode", "playwright") or "playwright"
+        ).lower()
+
+        try:
+            self._playwright = await async_playwright().start()
+
+            if connection_mode == "cdp":
+                await self._start_cdp()
+            else:
+                await self._start_playwright()
+
+            self._is_started = True
+            logger.info(
+                f"[M5] BrowserExecutor ready (mode={connection_mode}, type={self.config.browser_type}, headless={self.config.headless})"
+            )
+        except BrowserStartupError:
+            await self.stop()
+            raise
+        except Exception as exc:
+            await self.stop()
+            diag = self.get_diagnostics(self.config)
+            diag["startup_error"] = str(exc)
+            raise BrowserStartupError(
+                f"Failed to start browser session: {exc}",
+                diagnostics=diag,
+                suggested_fix="Ensure browser binaries are installed via 'python -m playwright install chromium' or verify CDP endpoint.",
+            ) from exc
+
+    async def _start_cdp(self) -> None:
+        """Connect to an existing Chrome/Chromium instance via Chrome DevTools Protocol."""
+        endpoint = getattr(self.config, "cdp_endpoint", "http://127.0.0.1:9222")
+        logger.info(f"[M5] Connecting to browser over CDP endpoint: {endpoint}")
+        try:
+            self._browser = await self._playwright.chromium.connect_over_cdp(endpoint)
+            self._is_cdp = True
+
+            contexts = self._browser.contexts
+            if contexts:
+                self._context = contexts[0]
+            else:
+                self._context = await self._browser.new_context(
+                    viewport={"width": 1366, "height": 768},
+                    locale="en-IN",
+                )
+
+            pages = self._context.pages
+            if pages:
+                self._page = pages[0]
+            else:
+                self._page = await self._context.new_page()
+
+            logger.info(f"[M5] Successfully connected to CDP browser ({endpoint})")
+        except Exception as exc:
+            diag = self.get_diagnostics(self.config)
+            diag["cdp_endpoint"] = endpoint
+            raise BrowserStartupError(
+                f"Could not connect to browser over CDP at {endpoint}. Ensure Chrome is running with '--remote-debugging-port=9222'.",
+                diagnostics=diag,
+                suggested_fix="Launch Chrome with: chrome.exe --remote-debugging-port=9222 --user-data-dir=\"<temp_dir>\"",
+            ) from exc
+
+    async def _start_playwright(self) -> None:
+        """Launch a dedicated Playwright browser instance with cascading fallbacks."""
         b_type = (self.config.browser_type or "chromium").lower()
         launch_kwargs = {
             "headless": self.config.headless,
@@ -88,6 +251,7 @@ class BrowserExecutor:
             ],
         }
 
+        self._is_cdp = False
         self._browser = await self._launch_browser_resiliently(b_type, launch_kwargs)
         self._context = await self._browser.new_context(
             user_agent=_USER_AGENT,
@@ -95,41 +259,66 @@ class BrowserExecutor:
             locale="en-IN",
         )
         self._page = await self._context.new_page()
-        logger.info(f"[M5] Browser started ({b_type}, headless={self.config.headless})")
 
     async def _launch_browser_resiliently(self, b_type: str, launch_kwargs: dict):
         """
-        Resilient browser launcher with cascading fallbacks:
+        Resilient browser launcher with clean fallback cascade:
         1. Requested browser / channel
         2. System Edge (channel='msedge')
         3. System Chrome (channel='chrome')
         4. Playwright bundled Chromium
-        5. Programmatic auto-install of Chromium if all missing
         """
-        # Strategy sequence
         launch_attempts = []
 
         if b_type in ("msedge", "edge"):
-            launch_attempts.append(("chromium (msedge)", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs)))
-            launch_attempts.append(("chromium (bundled)", lambda: self._playwright.chromium.launch(**launch_kwargs)))
-            launch_attempts.append(("chromium (chrome)", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs)))
+            launch_attempts.append(
+                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+            )
+            launch_attempts.append(
+                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
+            )
+            launch_attempts.append(
+                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+            )
         elif b_type in ("chrome", "google-chrome"):
-            launch_attempts.append(("chromium (chrome)", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs)))
-            launch_attempts.append(("chromium (msedge)", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs)))
-            launch_attempts.append(("chromium (bundled)", lambda: self._playwright.chromium.launch(**launch_kwargs)))
+            launch_attempts.append(
+                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+            )
+            launch_attempts.append(
+                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+            )
+            launch_attempts.append(
+                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
+            )
         elif b_type in ("firefox", "webkit"):
-            launcher = getattr(self._playwright, b_type)
-            launch_attempts.append((b_type, lambda: launcher.launch(**launch_kwargs)))
-            launch_attempts.append(("chromium (msedge)", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs)))
-            launch_attempts.append(("chromium (bundled)", lambda: self._playwright.chromium.launch(**launch_kwargs)))
+            launcher = getattr(self._playwright, b_type, None)
+            if launcher:
+                launch_attempts.append(
+                    (f"{b_type.capitalize()} (bundled)", lambda: launcher.launch(**launch_kwargs))
+                )
+            launch_attempts.append(
+                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+            )
+            launch_attempts.append(
+                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
+            )
         else:
-            # Default chromium
-            launch_attempts.append(("chromium (bundled)", lambda: self._playwright.chromium.launch(**launch_kwargs)))
-            launch_attempts.append(("chromium (msedge)", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs)))
-            launch_attempts.append(("chromium (chrome)", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs)))
+            # Default: chromium
+            launch_attempts.append(
+                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
+            )
+            launch_attempts.append(
+                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+            )
+            launch_attempts.append(
+                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+            )
 
         last_error = None
+        attempted_names = []
+
         for name, launcher_fn in launch_attempts:
+            attempted_names.append(name)
             try:
                 browser = await launcher_fn()
                 logger.info(f"[M5] Browser successfully launched using {name}")
@@ -138,35 +327,94 @@ class BrowserExecutor:
                 last_error = exc
                 logger.warning(f"[M5] Launch attempt with {name} failed: {exc}. Trying fallback...")
 
-        # If all failed, attempt auto-install and retry
-        logger.info("[M5] Missing browser binaries detected. Auto-installing Playwright Chromium...")
-        try:
-            import subprocess
-            proc = await asyncio.to_thread(
-                lambda: subprocess.run(
-                    [sys.executable, "-m", "playwright", "install", "chromium"],
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-            )
-            logger.info(f"[M5] Playwright auto-install finished (code {proc.returncode}). Retrying launch...")
-            return await self._playwright.chromium.launch(**launch_kwargs)
-        except Exception as install_err:
-            raise RuntimeError(
-                f"Failed to launch any browser. Auto-install failed: {install_err}. "
-                f"Original error: {last_error}"
-            ) from last_error
+        # If all launch attempts failed, construct informative diagnostic exception
+        diag = self.get_diagnostics(self.config)
+        diag["attempted_launchers"] = attempted_names
+        diag["last_error"] = str(last_error)
+
+        raise BrowserStartupError(
+            f"Failed to launch browser '{b_type}' after trying: {', '.join(attempted_names)}. "
+            f"Original error: {last_error}",
+            diagnostics=diag,
+            suggested_fix="Install missing browser binaries using: python -m playwright install chromium",
+        )
 
     async def stop(self) -> None:
-        """Close browser and Playwright cleanly."""
-        if self._browser:
-            await self._browser.close()
-        if self._playwright:
-            await self._playwright.stop()
-        logger.info("[M5] Browser stopped.")
+        """Close browser, context, page, and Playwright cleanly without leaving dangling processes."""
+        try:
+            if self._page:
+                if not self._page.is_closed():
+                    await self._page.close()
+        except Exception as e:
+            logger.debug(f"[M5] Error closing page: {e}")
+        finally:
+            self._page = None
 
-    # ── Single Action Execution ───────────────────────────────────
+        try:
+            if self._context:
+                await self._context.close()
+        except Exception as e:
+            logger.debug(f"[M5] Error closing context: {e}")
+        finally:
+            self._context = None
+
+        try:
+            if self._browser:
+                # In CDP mode, disconnecting is preferred over closing the external browser
+                if not self._is_cdp and self._browser.is_connected():
+                    await self._browser.close()
+                elif self._is_cdp and self._browser.is_connected():
+                    await self._browser.close()
+        except Exception as e:
+            logger.debug(f"[M5] Error closing browser: {e}")
+        finally:
+            self._browser = None
+
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+        except Exception as e:
+            logger.debug(f"[M5] Error stopping playwright: {e}")
+        finally:
+            self._playwright = None
+            self._is_started = False
+            self._selector_cache.clear()
+
+        logger.info("[M5] Browser stopped and resources released.")
+
+    # ── Health Check & Recovery ───────────────────────────────────────────────
+
+    async def _ensure_healthy(self) -> None:
+        """
+        Verify that browser, context, and page are alive and operational.
+        Performs controlled recovery if context or page has closed unexpectedly.
+        """
+        if not self._is_started or not self._playwright or not self._browser:
+            raise BrowserNotStartedError(
+                "BrowserExecutor not started. Use 'async with BrowserExecutor(config) as browser:'"
+            )
+
+        # 1. Verify browser connection
+        if not self._browser.is_connected():
+            logger.warning("[M5] Browser connection lost. Re-establishing browser session...")
+            await self.start()
+            return
+
+        # 2. Verify context
+        if not self._context:
+            logger.warning("[M5] Browser context missing. Recreating context...")
+            self._context = await self._browser.new_context(
+                user_agent=_USER_AGENT,
+                viewport={"width": 1366, "height": 768},
+                locale="en-IN",
+            )
+
+        # 3. Verify page
+        if not self._page or self._page.is_closed():
+            logger.warning("[M5] Browser page was closed or missing. Creating a new page to recover session...")
+            self._page = await self._context.new_page()
+
+    # ── Single Action Execution ───────────────────────────────────────────────
 
     async def execute(
         self,
@@ -185,12 +433,11 @@ class BrowserExecutor:
             screenshot: Whether to capture a screenshot after action.
 
         Returns:
-            dict with keys: url, title, accessibility_tree, screenshot_path, duration_ms
+            dict with keys: url, title, accessibility_tree, screenshot_path, duration_ms, action_success
         """
-        if not self._page:
-            raise RuntimeError("BrowserExecutor not started. Use async context manager.")
+        await self._ensure_healthy()
 
-        # Safety check
+        # Safety check: normalize and block forbidden purchase URLs
         if action.action == "navigate" and action.value:
             self._check_blocklist(action.value)
 
@@ -200,24 +447,30 @@ class BrowserExecutor:
         start_ms = int(time.time() * 1000)
         timeout = action.timeout_ms or self.config.action_timeout_ms
         success = True
+        error_msg = None
 
         try:
             await self._dispatch(action, timeout)
             # Smart wait: wait for DOM ready instead of fixed sleep
             await self._smart_wait(action)
+        except BrowserBlockedError:
+            raise
         except Exception as e:
-            logger.warning(f"[M5] Action failed: {action.action} → {e}")
+            logger.warning(f"[M5] Action execution failed: {action.action} (target={action.selector}) → {e}")
             success = False
+            error_msg = str(e)
 
         duration_ms = int(time.time() * 1000) - start_ms
 
-        # Capture page state
+        # Capture page state safely
         raw_state = await self._capture_state(run_id, step_index, screenshot)
         raw_state["duration_ms"] = duration_ms
         raw_state["action_success"] = success
+        if error_msg:
+            raw_state["action_error"] = error_msg
         return raw_state
 
-    # ── Batch Execution (Plan-then-Execute) ───────────────────────
+    # ── Batch Execution (Plan-then-Execute) ────────────────────────────────────
 
     async def execute_batch(
         self,
@@ -241,8 +494,7 @@ class BrowserExecutor:
         Returns:
             List of raw state dicts, one per action.
         """
-        if not self._page:
-            raise RuntimeError("BrowserExecutor not started.")
+        await self._ensure_healthy()
 
         checkpoints = set(checkpoint_indices or [])
         results = []
@@ -251,8 +503,7 @@ class BrowserExecutor:
             step_idx = start_step + i
             is_checkpoint = i in checkpoints
 
-            # Only take screenshot at checkpoints
-            take_screenshot = is_checkpoint and not self.config.screenshots_at_checkpoints_only
+            take_screenshot = is_checkpoint and self.config.screenshots_at_checkpoints_only
             if is_checkpoint:
                 take_screenshot = True
 
@@ -260,44 +511,50 @@ class BrowserExecutor:
                 action,
                 run_id=run_id,
                 step_index=step_idx,
-                screenshot=take_screenshot if is_checkpoint else False,
+                screenshot=take_screenshot,
             )
             results.append(result)
 
-            # If action failed at a checkpoint, stop batch
+            # If action failed at a checkpoint, halt batch to prevent cascading failures
             if not result.get("action_success", True) and is_checkpoint:
-                logger.warning(f"[M5] Batch stopped at step {step_idx}: action failed at checkpoint")
+                logger.warning(f"[M5] Batch halted at step {step_idx}: action failed at checkpoint")
                 break
 
         return results
 
-    # ── Action Dispatch ───────────────────────────────────────────
+    # ── Action Dispatch ───────────────────────────────────────────────────────
 
     async def _dispatch(self, action: ActionObject, timeout: int) -> None:
         """Route action to the correct Playwright method."""
         page = self._page
-        act = action.action.lower()
+        act = (action.action or "").lower().strip()
 
         if act == "click":
             el = await self._resolve_element(action.selector, timeout)
             if el:
                 await el.click(timeout=timeout)
             else:
-                logger.warning(f"[M5] Click target not found: {action.selector}")
+                raise RuntimeError(
+                    f"Target element for click not found matching selector/text '{action.selector}'"
+                )
 
         elif act in ("type", "fill"):
             el = await self._resolve_element(action.selector, timeout)
             if el:
                 await el.fill(action.value or "", timeout=timeout)
-                # Don't auto-press Enter for fill actions
+                # Auto-press Enter for 'type' action (e.g. search box submit)
                 if act == "type":
                     await el.press("Enter")
             else:
-                logger.warning(f"[M5] Type target not found: {action.selector}")
+                raise RuntimeError(
+                    f"Target element for {act} not found matching selector/text '{action.selector}'"
+                )
 
         elif act == "navigate":
-            url = action.value or ""
-            if not url.startswith("http"):
+            url = (action.value or "").strip()
+            if not url:
+                raise ValueError("Navigate action requires a valid URL value.")
+            if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("about:"):
                 url = "https://" + url
             await page.goto(url, timeout=self.config.page_load_timeout_ms)
 
@@ -305,30 +562,37 @@ class BrowserExecutor:
             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
 
         elif act == "extract":
-            # Extract is a logical action; no browser interaction needed
+            # Logical extraction action; page state capture handles raw tree extraction
             pass
 
         elif act == "wait":
-            await asyncio.sleep(1.0)
+            wait_time = 1.0
+            if action.value:
+                try:
+                    wait_time = float(action.value)
+                except ValueError:
+                    wait_time = 1.0
+            await asyncio.sleep(min(wait_time, 5.0))
 
         else:
-            logger.warning(f"[M5] Unknown action type: {act}")
+            raise ValueError(f"Unknown action type: '{act}'")
 
     async def _smart_wait(self, action: ActionObject) -> None:
         """Use browser-native waits instead of fixed sleeps."""
         try:
+            if not self._page or self._page.is_closed():
+                return
             if action.action in ("navigate", "click"):
                 await self._page.wait_for_load_state(
                     "domcontentloaded",
                     timeout=min(self.config.page_load_timeout_ms, 3000),
                 )
             elif action.action in ("type", "fill"):
-                # Brief wait for any AJAX response
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.2)
         except Exception:
-            pass  # Timeout is acceptable, page may already be ready
+            pass  # Page might already be settled
 
-    # ── Element Resolution (Multi-strategy with caching) ──────────
+    # ── Element Resolution (Multi-strategy with caching) ──────────────────────
 
     async def _resolve_element(self, selector: str | None, timeout: int):
         """
@@ -336,15 +600,17 @@ class BrowserExecutor:
 
         Priority:
         1. Cached CSS selector (from previous successful resolution)
-        2. Direct CSS selector
+        2. Direct CSS locator
         3. aria-label match
-        4. Text content match
-        5. Placeholder match
+        4. Placeholder match
+        5. Text content match
         6. Role + name via get_by_role
         """
         if not selector:
             return None
         page = self._page
+        if not page or page.is_closed():
+            return None
 
         # 1. Check cache first
         if selector in self._selector_cache:
@@ -354,7 +620,7 @@ class BrowserExecutor:
                 await el.wait_for(state="visible", timeout=min(timeout, 2000))
                 return el
             except Exception:
-                # Cache miss — selector changed, remove it
+                # Cache miss / DOM mutated — remove invalid entry
                 del self._selector_cache[selector]
 
         # 2. Try as direct CSS selector
@@ -392,7 +658,7 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # 6. Try role-based matching for common roles
+        # 6. Try role-based matching for common interactive roles
         for role in ("button", "link", "textbox", "searchbox", "combobox"):
             try:
                 el = page.get_by_role(role, name=selector).first
@@ -404,37 +670,52 @@ class BrowserExecutor:
         logger.warning(f"[M5] Element not found after all strategies: {selector}")
         return None
 
-    # ── State Capture ─────────────────────────────────────────────
+    # ── State Capture ─────────────────────────────────────────────────────────
 
     async def _capture_state(
         self, run_id: str, step_index: int, take_screenshot: bool
     ) -> dict[str, Any]:
-        """Capture current page accessibility tree and optional screenshot."""
+        """Defensively capture current page URL, title, accessibility tree, and optional screenshot."""
         page = self._page
 
-        url = page.url
-        title = await page.title()
+        url = ""
+        title = ""
+        if page and not page.is_closed():
+            try:
+                url = page.url or ""
+                title = await page.title()
+            except Exception:
+                url = getattr(page, "url", "") or ""
+                title = "Unknown Page"
 
-        # Accessibility tree
-        try:
-            acc_tree = await page.accessibility.snapshot()
-        except Exception:
-            acc_tree = {}
+        # Accessibility tree snapshot
+        acc_tree = {}
+        if page and not page.is_closed():
+            try:
+                acc_tree = await page.accessibility.snapshot() or {}
+            except Exception as acc_err:
+                logger.debug(f"[M5] Accessibility snapshot failed: {acc_err}")
+                acc_tree = {}
 
-        # Screenshot
+        # Optional Screenshot
         screenshot_path = None
-        if take_screenshot:
-            screenshot_path = await self._save_screenshot(run_id, step_index)
+        if take_screenshot and page and not page.is_closed():
+            try:
+                screenshot_path = await self._save_screenshot(run_id, step_index)
+            except Exception as sc_err:
+                logger.warning(f"[M5] Failed to capture screenshot: {sc_err}")
 
         return {
             "url": url,
             "title": title,
-            "accessibility_tree": acc_tree or {},
+            "accessibility_tree": acc_tree,
             "screenshot_path": screenshot_path,
         }
 
-    async def _save_screenshot(self, run_id: str, step_index: int) -> str:
+    async def _save_screenshot(self, run_id: str, step_index: int) -> str | None:
         """Save a screenshot to logs/runs/{run_id}/step_{n}.png."""
+        if not self._page or self._page.is_closed():
+            return None
         run_dir = Path(self.config.log_dir) / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         path = str(run_dir / f"step_{step_index:03d}.png")
@@ -444,7 +725,7 @@ class BrowserExecutor:
 
     def _check_blocklist(self, url: str) -> None:
         """Raise BrowserBlockedError if URL matches any blocklist pattern."""
-        url_lower = url.lower()
+        url_lower = (url or "").lower()
         for pattern in self.config.block_purchase_urls:
             if pattern.lower() in url_lower:
                 raise BrowserBlockedError(
@@ -452,5 +733,5 @@ class BrowserExecutor:
                 )
 
     def clear_selector_cache(self) -> None:
-        """Clear the selector cache (e.g., when navigating to a new site)."""
+        """Clear the selector cache (e.g. when navigating to a new site)."""
         self._selector_cache.clear()
