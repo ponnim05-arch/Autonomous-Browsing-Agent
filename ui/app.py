@@ -214,7 +214,7 @@ if page == "🏠 Home":
 
     clean_strategy = strategy_mode.split(" ")[0].strip()
 
-    if st.button("▶ Plan & Queue Task", type="primary", use_container_width=True):
+    if st.button("▶ Plan & Queue Task", type="primary", width="stretch"):
         clean_model = model_choice.split(" ")[0].strip()
         clean_conn = "cdp" if "cdp" in conn_mode_choice else "playwright"
 
@@ -319,12 +319,12 @@ if page == "🏠 Home":
             st.info("No runs yet. Submit a goal above to get started.")
         else:
             st.dataframe(
-                history_df.style.applymap(
+                history_df.style.map(
                     lambda v: "color: green" if v == "success"
                     else ("color: red" if v == "failed" else ""),
                     subset=["status"],
                 ),
-                use_container_width=True,
+                width="stretch",
                 height=300,
             )
     except Exception:
@@ -628,7 +628,7 @@ elif page == "🤖 Agent View":
                         price_info += f" | ⭐ {prod.get('rating')}"
                     p2.markdown(price_info)
                     if prod.get("url"):
-                        p3.link_button("🔗 Direct Product Link", prod["url"], use_container_width=True)
+                        p3.link_button("🔗 Direct Product Link", prod["url"], width="stretch")
 
         # Show Performance Scorecard if metrics are available
         if st.session_state.last_metrics:
@@ -703,7 +703,7 @@ elif page == "📊 Dashboard":
                     text_auto=".1f",
                 )
                 fig1.update_layout(showlegend=False, yaxis_range=[0, 105])
-                st.plotly_chart(fig1, use_container_width=True)
+                st.plotly_chart(fig1, width="stretch")
 
             with col_b:
                 fig2 = px.bar(
@@ -713,7 +713,7 @@ elif page == "📊 Dashboard":
                     text_auto=".1f",
                 )
                 fig2.update_layout(showlegend=False, yaxis_range=[0, 105])
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
 
             col_c, col_d = st.columns(2)
             with col_c:
@@ -724,7 +724,7 @@ elif page == "📊 Dashboard":
                     text_auto=".2f",
                 )
                 fig3.update_layout(showlegend=False)
-                st.plotly_chart(fig3, use_container_width=True)
+                st.plotly_chart(fig3, width="stretch")
 
             with col_d:
                 fig4 = px.bar(
@@ -734,10 +734,10 @@ elif page == "📊 Dashboard":
                     text_auto=".0f",
                 )
                 fig4.update_layout(showlegend=False)
-                st.plotly_chart(fig4, use_container_width=True)
+                st.plotly_chart(fig4, width="stretch")
 
         st.subheader("📋 Full Metrics Table")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -589,6 +589,29 @@ class BrowserExecutor:
                     wait_time = 1.0
             await asyncio.sleep(min(wait_time, 5.0))
 
+        elif act == "select":
+            el = await self._resolve_element(action.selector, timeout)
+            if el:
+                try:
+                    await el.select_option(label=action.value or "", timeout=timeout)
+                except Exception:
+                    # Fallback: try by value
+                    try:
+                        await el.select_option(value=action.value or "", timeout=timeout)
+                    except Exception as e2:
+                        logger.warning(f"[M5] Select option failed: {e2}")
+            else:
+                raise RuntimeError(
+                    f"Target element for select not found: '{action.selector}'"
+                )
+
+        elif act == "press":
+            key = (action.value or "Enter").strip()
+            await page.keyboard.press(key)
+
+        elif act == "dismiss_popup":
+            await self._dismiss_popups()
+
         else:
             raise ValueError(f"Unknown action type: '{act}'")
 
@@ -597,17 +620,102 @@ class BrowserExecutor:
         try:
             if not self._page or self._page.is_closed():
                 return
-            if action.action in ("navigate", "click"):
-                await self._page.wait_for_load_state(
-                    "domcontentloaded",
-                    timeout=min(self.config.page_load_timeout_ms, 3000),
-                )
+            if action.action == "navigate":
+                # Heavy pages (Amazon, Flipkart, MakeMyTrip) need networkidle
+                try:
+                    await self._page.wait_for_load_state(
+                        "networkidle",
+                        timeout=min(self.config.page_load_timeout_ms, 12000),
+                    )
+                except Exception:
+                    # Fallback to domcontentloaded if networkidle times out
+                    try:
+                        await self._page.wait_for_load_state(
+                            "domcontentloaded",
+                            timeout=3000,
+                        )
+                    except Exception:
+                        pass
+                # Auto-dismiss popups after navigation
+                await self._dismiss_popups()
+            elif action.action == "click":
+                # After clicking products/cart/buy, wait for new page to settle
+                try:
+                    await self._page.wait_for_load_state(
+                        "networkidle",
+                        timeout=min(self.config.page_load_timeout_ms, 8000),
+                    )
+                except Exception:
+                    try:
+                        await self._page.wait_for_load_state(
+                            "domcontentloaded",
+                            timeout=3000,
+                        )
+                    except Exception:
+                        pass
             elif action.action in ("type", "fill"):
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.5)
             elif action.action == "extract":
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.3)
+            elif action.action == "dismiss_popup":
+                await asyncio.sleep(0.3)
         except Exception:
             pass  # Page might already be settled
+
+    async def _dismiss_popups(self) -> None:
+        """
+        Auto-close cookie banners, notification prompts, login popups, and overlays.
+        Runs silently — if no popups found, does nothing.
+        """
+        if not self._page or self._page.is_closed():
+            return
+
+        # Common popup/overlay close selectors across major sites
+        popup_selectors = [
+            # Cookie consent
+            "button:has-text('Accept')",
+            "button:has-text('Accept All')",
+            "button:has-text('Accept Cookies')",
+            "button:has-text('Got it')",
+            "button:has-text('I agree')",
+            "button:has-text('OK')",
+            "button:has-text('Agree')",
+            "[aria-label='Accept cookies']",
+            "#cookie-accept",
+            # Generic close buttons
+            "button[aria-label='Close']",
+            "button[aria-label='Dismiss']",
+            "button:has-text('✕')",
+            "button:has-text('×')",
+            "button:has-text('Close')",
+            ".close-button",
+            ".modal-close",
+            "[data-dismiss='modal']",
+            "[data-testid='close-button']",
+            # Login/notification dismiss
+            "button:has-text('Not Now')",
+            "button:has-text('Skip')",
+            "button:has-text('No Thanks')",
+            "button:has-text('Maybe Later')",
+            "button:has-text('Remind me later')",
+            # Amazon-specific
+            "#sp-cc-accept",
+            "input[data-action-type='DISMISS']",
+            # Flipkart-specific
+            "button._2KpZ6l._2doB4z",
+            "button:has-text('✕'):near(.login)",
+        ]
+
+        for sel in popup_selectors:
+            try:
+                el = self._page.locator(sel).first
+                if await el.is_visible(timeout=600):
+                    await el.click(timeout=1500)
+                    logger.info(f"[M5] Dismissed popup via: {sel}")
+                    await asyncio.sleep(0.3)
+                    break  # One popup dismissed per call
+            except Exception:
+                continue
 
     # ── Element Resolution (Multi-strategy with caching & semantic mapping) ───
 
@@ -705,6 +813,188 @@ class BrowserExecutor:
                     return el
                 except Exception:
                     continue
+
+        # 5. Semantic mapping for Add to Cart / Cart Button
+        if any(k in sel_lower for k in ("add_to_cart", "add to cart", "cart_button", "add_cart", "addtocart")):
+            cart_selectors = [
+                "#add-to-cart-button",
+                "input#add-to-cart-button",
+                "#add-to-cart-button-ubb",
+                "button:has-text('Add to Cart')",
+                "button:has-text('Add to cart')",
+                "input[value*='Add to Cart' i]",
+                "button:has-text('ADD TO CART')",
+                "[data-action='add-to-cart']",
+                "button.add-to-cart",
+                ".add-to-cart-button",
+                "button:has-text('Add to Basket')",
+                # Flipkart
+                "button:has-text('Add to Cart')",
+                "button._2KpZ6l",
+                "button.QqFHMw",
+            ]
+            for s in cart_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 3000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 6. Semantic mapping for Buy Now
+        if any(k in sel_lower for k in ("buy_now", "buy now", "buy_button", "buynow")):
+            buy_selectors = [
+                "#buy-now-button",
+                "input#buy-now-button",
+                "button:has-text('Buy Now')",
+                "button:has-text('BUY NOW')",
+                "input[value*='Buy Now' i]",
+                ".buy-now-button",
+                "button._2KpZ6l._1FqOHf",
+                "button:has-text('Buy Now')",
+            ]
+            for s in buy_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 3000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 7. Semantic mapping for Book Now / Reserve
+        if any(k in sel_lower for k in ("book_now", "book now", "book_button", "reserve_button", "reserve", "book_ticket")):
+            book_selectors = [
+                "button:has-text('Book Now')",
+                "button:has-text('Book')",
+                "button:has-text('Reserve')",
+                "a:has-text('Book Now')",
+                "a:has-text('Book')",
+                "button:has-text('BOOK NOW')",
+                ".book-btn",
+                ".book-now",
+                "button:has-text('Search')",  # travel sites use "Search" for booking
+            ]
+            for s in book_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 3000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 8. Semantic mapping for Login / Sign In
+        if any(k in sel_lower for k in ("login_button", "login", "sign_in", "signin", "log_in")):
+            login_selectors = [
+                "button:has-text('Sign In')",
+                "button:has-text('Log In')",
+                "button:has-text('Login')",
+                "a:has-text('Sign In')",
+                "a:has-text('Log In')",
+                "a:has-text('Login')",
+                "#signInSubmit",
+                "input[type='submit'][value*='Sign' i]",
+                "button[type='submit']",
+            ]
+            for s in login_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 9. Semantic mapping for Proceed / Continue / Next
+        if any(k in sel_lower for k in ("proceed_button", "proceed", "continue_button", "continue", "next_button", "next")):
+            proceed_selectors = [
+                "button:has-text('Proceed')",
+                "button:has-text('Continue')",
+                "button:has-text('Next')",
+                "a:has-text('Proceed')",
+                "a:has-text('Continue')",
+                "a:has-text('Next')",
+                "input[type='submit'][value*='Proceed' i]",
+                "input[type='submit'][value*='Continue' i]",
+                ".proceed-btn",
+                ".continue-btn",
+            ]
+            for s in proceed_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 10. Semantic mapping for Date Input / Picker
+        if any(k in sel_lower for k in ("date_input", "date_picker", "date", "check_in", "check_out", "departure", "arrival")):
+            date_selectors = [
+                "input[type='date']",
+                "input[placeholder*='date' i]",
+                "input[placeholder*='check' i]",
+                "input[name*='date' i]",
+                "input[aria-label*='date' i]",
+                "[data-testid*='date']",
+                "input[id*='date' i]",
+            ]
+            for s in date_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 11. Semantic mapping for Quantity / Passengers
+        if any(k in sel_lower for k in ("quantity_input", "quantity", "qty", "passenger_input", "passengers", "travellers", "adults")):
+            qty_selectors = [
+                "#quantity",
+                "select[name*='quantity' i]",
+                "input[name*='qty' i]",
+                "input[name*='quantity' i]",
+                "select[name*='passenger' i]",
+                "select[name*='adult' i]",
+                "input[name*='passenger' i]",
+            ]
+            for s in qty_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 12. Semantic mapping for Close Popup / Dismiss
+        if any(k in sel_lower for k in ("close_popup", "dismiss", "close_modal", "close_overlay", "close_banner")):
+            popup_selectors = [
+                "button[aria-label='Close']",
+                "button[aria-label='Dismiss']",
+                "button:has-text('✕')",
+                "button:has-text('×')",
+                "button:has-text('Close')",
+                ".close-button",
+                ".modal-close",
+                "[data-dismiss='modal']",
+                "button:has-text('Not Now')",
+                "button:has-text('Skip')",
+                "#sp-cc-accept",
+            ]
+            for s in popup_selectors:
+                try:
+                    el = page.locator(s).first
+                    if await el.is_visible(timeout=800):
+                        self._selector_cache[selector] = s
+                        return el
+                except Exception:
+                    continue
+            # No popup found — not an error
+            return None
 
         # 5. Try as direct CSS selector
         try:

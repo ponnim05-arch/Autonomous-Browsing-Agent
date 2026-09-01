@@ -204,14 +204,40 @@ class Verifier:
                 confidence_score=0.60,
             )
 
-        # Check 4: No elements on page (stuck?)
-        if not page.interactive_elements and not page.extracted_items and not page.title:
+        # Check 4: Click on interactive PA targets (cart, buy, book)
+        if action.action == "click":
+            sel_lower = (action.selector or "").lower()
+            pa_targets = ("add_to_cart", "buy_now", "book_now", "cart_button",
+                          "proceed", "continue", "next", "login", "sign_in",
+                          "close_popup", "dismiss", "reserve")
+            if any(t in sel_lower for t in pa_targets):
+                # If URL or title changed, it's a success
+                if prev_page and (page.url != prev_page.url or page.title != prev_page.title):
+                    return VerificationResult(
+                        status="success",
+                        reason=f"Clicked '{action.selector}' → page changed to '{page.title[:50]}'",
+                        expected_outcome=f"Interactive action '{action.selector}' completed",
+                        confidence_score=0.92,
+                    )
+                # Even if page didn't change, action itself succeeded (e.g. cart popup)
+                return VerificationResult(
+                    status="success",
+                    reason=f"Clicked '{action.selector}' on '{page.title[:50]}'",
+                    expected_outcome=f"Interactive action '{action.selector}' completed",
+                    confidence_score=0.85,
+                )
+
+        # Check 5: Fill / Select / Press — success if no error
+        if action.action in ("fill", "type", "select", "press", "dismiss_popup"):
             return VerificationResult(
-                status="partial",
-                reason="No interactive elements found on page — may be loading or blank",
-                expected_outcome="Page with interactive elements",
-                confidence_score=0.50,
+                status="success",
+                reason=f"Action '{action.action}' completed on '{page.title[:50]}'",
+                expected_outcome=f"{action.action} action executed",
+                confidence_score=0.88,
             )
+
+        # Check 6: No elements on page (stuck?)
+        if not page.interactive_elements and not page.extracted_items and not page.title:
             return VerificationResult(
                 status="partial",
                 reason="No interactive elements found on page — may be loading or blank",

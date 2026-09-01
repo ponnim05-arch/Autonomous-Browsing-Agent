@@ -94,9 +94,10 @@ class AgentConfig:
     page_load_timeout_ms: int = 30_000
 
     # ── Safety ─────────────────────────────────────────────────────
+    # PA mode: allow cart/checkout — only block final payment submission
     block_purchase_urls: list[str] = field(
         default_factory=lambda: _env_list(
-            "BLOCK_PURCHASE_URLS", "checkout,payment,cart/confirm,order/place"
+            "BLOCK_PURCHASE_URLS", "payment/process,order/confirm,pay/submit,payment/complete"
         )
     )
 
