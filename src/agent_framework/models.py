@@ -88,6 +88,8 @@ class PageState(BaseModel):
     summary_text: str = ""
     screenshot_path: Optional[str] = None
     raw_html_length: int = 0
+    extracted_items: list[dict[str, Any]] = Field(default_factory=list)
+    direct_link: Optional[str] = None
 
 
 # ── M8 Output ─────────────────────────────────────────────────────────────────

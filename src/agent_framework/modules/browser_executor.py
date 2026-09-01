@@ -95,9 +95,9 @@ class BrowserExecutor:
         self._context = None
         self._page = None
         self._is_started = False
-        self._is_cdp = False
         # Selector cache: description → CSS selector
         self._selector_cache: dict[str, str] = {}
+        self._last_extracted_items: list[dict[str, Any]] = []
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
 
@@ -528,12 +528,21 @@ class BrowserExecutor:
         """Route action to the correct Playwright method."""
         page = self._page
         act = (action.action or "").lower().strip()
+        sel_lower = (action.selector or "").lower().strip()
 
         if act == "click":
             el = await self._resolve_element(action.selector, timeout)
             if el:
                 await el.click(timeout=timeout)
             else:
+                # Fallback specifically for search submit buttons if not found
+                if any(k in sel_lower for k in ("search_button", "search_btn", "search submit", "submit search", "search-button")):
+                    try:
+                        logger.info("[M5] Search button not directly clickable, pressing Enter on active search input...")
+                        await page.keyboard.press("Enter")
+                        return
+                    except Exception:
+                        pass
                 raise RuntimeError(
                     f"Target element for click not found matching selector/text '{action.selector}'"
                 )
@@ -542,9 +551,12 @@ class BrowserExecutor:
             el = await self._resolve_element(action.selector, timeout)
             if el:
                 await el.fill(action.value or "", timeout=timeout)
-                # Auto-press Enter for 'type' action (e.g. search box submit)
-                if act == "type":
-                    await el.press("Enter")
+                # Auto-press Enter on search fields / queries to trigger instant website search
+                if act == "type" or any(k in sel_lower for k in ("search", "query", "box", "input", "find")):
+                    try:
+                        await el.press("Enter")
+                    except Exception:
+                        pass
             else:
                 raise RuntimeError(
                     f"Target element for {act} not found matching selector/text '{action.selector}'"
@@ -562,8 +574,10 @@ class BrowserExecutor:
             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
 
         elif act == "extract":
-            # Logical extraction action; page state capture handles raw tree extraction
-            pass
+            # Live in-page structured product and link extraction
+            extracted = await self._extract_page_products_or_items(action.selector, action.value)
+            self._last_extracted_items = extracted
+            action.value = str(extracted)
 
         elif act == "wait":
             wait_time = 1.0
@@ -588,11 +602,13 @@ class BrowserExecutor:
                     timeout=min(self.config.page_load_timeout_ms, 3000),
                 )
             elif action.action in ("type", "fill"):
+                await asyncio.sleep(0.3)
+            elif action.action == "extract":
                 await asyncio.sleep(0.2)
         except Exception:
             pass  # Page might already be settled
 
-    # ── Element Resolution (Multi-strategy with caching) ──────────────────────
+    # ── Element Resolution (Multi-strategy with caching & semantic mapping) ───
 
     async def _resolve_element(self, selector: str | None, timeout: int):
         """
@@ -600,11 +616,12 @@ class BrowserExecutor:
 
         Priority:
         1. Cached CSS selector (from previous successful resolution)
-        2. Direct CSS locator
-        3. aria-label match
-        4. Placeholder match
-        5. Text content match
-        6. Role + name via get_by_role
+        2. Semantic intent matches (search buttons, search inputs, product links, cart)
+        3. Direct CSS locator
+        4. aria-label match
+        5. Placeholder match
+        6. Text content match
+        7. Role + name via get_by_role
         """
         if not selector:
             return None
@@ -623,7 +640,72 @@ class BrowserExecutor:
                 # Cache miss / DOM mutated — remove invalid entry
                 del self._selector_cache[selector]
 
-        # 2. Try as direct CSS selector
+        sel_lower = selector.lower().strip()
+
+        # 2. Semantic mapping for Search Buttons / Submit Buttons
+        if any(k in sel_lower for k in ("search_button", "search_btn", "search button", "search-submit", "submit search", "submit_button")):
+            search_btn_selectors = [
+                "#nav-search-submit-button",
+                "input[id*='search-submit']",
+                "button[type='submit']",
+                "input[type='submit']",
+                "[aria-label*='search' i]",
+                "[title*='search' i]",
+                "button:has-text('Search')",
+                "button:has-text('Go')",
+                ".nav-search-submit input",
+            ]
+            for s in search_btn_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 1500))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 3. Semantic mapping for Search Query / Inputs
+        if any(k in sel_lower for k in ("search_query", "search_box", "search_input", "search query", "searchbox", "search bar", "search_field")):
+            search_input_selectors = [
+                "#twotabsearchtextbox",
+                "input[name='field-keywords']",
+                "input[name='q']",
+                "input[type='search']",
+                "input[placeholder*='search' i]",
+                "input[aria-label*='search' i]",
+                "input[type='text']",
+                "textarea[name='q']",
+            ]
+            for s in search_input_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 1500))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 4. Semantic mapping for Products / Cheapest Item / First Item Links
+        if any(k in sel_lower for k in ("cheapest_product", "first_product", "product_link", "product", "item_link", "first item", "cheapest item", "product_card")):
+            product_selectors = [
+                "[data-component-type='s-search-result'] h2 a",
+                "[data-component-type='s-search-result'] a.a-link-normal[href*='/dp/']",
+                "div[data-id] a",
+                ".product-card a",
+                "article a[href]",
+                "a:has(h2)",
+                "a:has(h3)",
+            ]
+            for s in product_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 5. Try as direct CSS selector
         try:
             el = page.locator(selector).first
             await el.wait_for(state="visible", timeout=min(timeout, 2000))
@@ -632,7 +714,7 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # 3. Try aria-label
+        # 6. Try aria-label
         try:
             el = page.locator(f'[aria-label*="{selector}" i]').first
             await el.wait_for(state="visible", timeout=min(timeout, 2000))
@@ -641,7 +723,7 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # 4. Try placeholder
+        # 7. Try placeholder
         try:
             el = page.locator(f'[placeholder*="{selector}" i]').first
             await el.wait_for(state="visible", timeout=min(timeout, 2000))
@@ -650,7 +732,7 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # 5. Try text match
+        # 8. Try text match
         try:
             el = page.get_by_text(selector, exact=False).first
             await el.wait_for(state="visible", timeout=min(timeout, 2000))
@@ -658,7 +740,7 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # 6. Try role-based matching for common interactive roles
+        # 9. Try role-based matching for common interactive roles
         for role in ("button", "link", "textbox", "searchbox", "combobox"):
             try:
                 el = page.get_by_role(role, name=selector).first
@@ -670,12 +752,161 @@ class BrowserExecutor:
         logger.warning(f"[M5] Element not found after all strategies: {selector}")
         return None
 
+    # ── In-Page Product & Direct Link Extraction ──────────────────────────────
+
+    async def _extract_page_products_or_items(
+        self, selector: str | None = None, value: str | None = None
+    ) -> list[dict[str, Any]]:
+        """
+        Extract structured items, titles, prices, ratings, and direct links from the page.
+        """
+        if not self._page or self._page.is_closed():
+            return []
+
+        js_extractor = """
+        () => {
+            const results = [];
+            const seenUrls = new Set();
+
+            // 1. Amazon selectors
+            const amazonItems = document.querySelectorAll('div[data-component-type="s-search-result"], div.s-result-item[data-asin]');
+            if (amazonItems.length > 0) {
+                amazonItems.forEach(item => {
+                    const titleEl = item.querySelector('h2 a span, h2 a, h2 span, span.a-text-normal');
+                    const linkEl = item.querySelector('h2 a, a.a-link-normal[href*="/dp/"], a[href*="/dp/"]');
+                    const priceEl = item.querySelector('.a-price .a-offscreen, .a-price-whole');
+                    const ratingEl = item.querySelector('i.a-icon-star-small span, span.a-icon-alt');
+                    
+                    if (titleEl && linkEl) {
+                        const title = titleEl.textContent.trim();
+                        let href = linkEl.getAttribute('href') || '';
+                        if (href.startsWith('/')) href = window.location.origin + href;
+                        
+                        let priceText = priceEl ? priceEl.textContent.trim() : '';
+                        let priceNum = 0;
+                        if (priceText) {
+                            const cleanNum = priceText.replace(/[^0-9.]/g, '');
+                            priceNum = parseFloat(cleanNum) || 0;
+                        }
+                        
+                        if (title && href && !seenUrls.has(href)) {
+                            seenUrls.add(href);
+                            results.push({
+                                title: title,
+                                price: priceText || 'N/A',
+                                price_num: priceNum,
+                                url: href,
+                                rating: ratingEl ? ratingEl.textContent.trim() : ''
+                            });
+                        }
+                    }
+                });
+            }
+
+            // 2. Flipkart selectors
+            if (results.length === 0) {
+                const flipkartItems = document.querySelectorAll('div[data-id], div._1AtVbE, div._75nlfW');
+                flipkartItems.forEach(item => {
+                    const titleEl = item.querySelector('div.KzDlHZ, div._4rR01T, a.wByJw6, a.s1Q9rs, div[class*="title"]');
+                    const linkEl = item.querySelector('a[href*="/p/"], a._1fQZEK, a.VJA3rP, a[class*="link"]');
+                    const priceEl = item.querySelector('div.Nx9bqj, div._30jeq3, div[class*="price"]');
+                    
+                    if (titleEl) {
+                        const title = titleEl.textContent.trim();
+                        let href = linkEl ? linkEl.getAttribute('href') || '' : '';
+                        if (href.startsWith('/')) href = window.location.origin + href;
+                        let priceText = priceEl ? priceEl.textContent.trim() : '';
+                        let priceNum = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
+                        
+                        if (title && (!href || !seenUrls.has(href))) {
+                            if (href) seenUrls.add(href);
+                            results.push({
+                                title: title,
+                                price: priceText || 'N/A',
+                                price_num: priceNum,
+                                url: href || window.location.href,
+                                rating: ''
+                            });
+                        }
+                    }
+                });
+            }
+
+            // 3. Generic Product / Article / Search results (Google, Shopify, general stores)
+            if (results.length === 0) {
+                const cards = document.querySelectorAll('article, .product-card, .product-item, .product, div.card, div.g');
+                cards.forEach(card => {
+                    const heading = card.querySelector('h1, h2, h3, h4, .title, a');
+                    const link = card.querySelector('a[href]');
+                    const price = card.querySelector('.price, [class*="price"], [id*="price"]');
+                    
+                    if (heading && link) {
+                        const title = heading.textContent.trim();
+                        let href = link.getAttribute('href') || '';
+                        if (href.startsWith('/')) href = window.location.origin + href;
+                        let priceText = price ? price.textContent.trim() : '';
+                        let priceNum = parseFloat(priceText.replace(/[^0-9.]/g, '')) || 0;
+                        
+                        if (title && href && href.startsWith('http') && !seenUrls.has(href)) {
+                            seenUrls.add(href);
+                            results.push({
+                                title: title,
+                                price: priceText || 'N/A',
+                                price_num: priceNum,
+                                url: href,
+                                rating: ''
+                            });
+                        }
+                    }
+                });
+            }
+
+            // 4. Fallback: all links with significant headings/text
+            if (results.length === 0) {
+                const links = document.querySelectorAll('h2 a[href], h3 a[href], a[href]:has(h2), a[href]:has(h3)');
+                links.forEach(l => {
+                    let href = l.getAttribute('href') || '';
+                    if (href.startsWith('/')) href = window.location.origin + href;
+                    const text = l.textContent.trim();
+                    if (text.length > 10 && href.startsWith('http') && !seenUrls.has(href)) {
+                        seenUrls.add(href);
+                        results.push({
+                            title: text,
+                            price: 'N/A',
+                            price_num: 0,
+                            url: href,
+                            rating: ''
+                        });
+                    }
+                });
+            }
+
+            return results.slice(0, 15);
+        }
+        """
+
+        try:
+            items = await self._page.evaluate(js_extractor) or []
+            # If user asked for cheapest product, sort by price_num ascending
+            sel_query = f"{selector or ''} {value or ''}".lower()
+            if any(k in sel_query for k in ("cheap", "lowest", "least", "min")):
+                valid_priced = [it for it in items if it.get("price_num", 0) > 0]
+                unpriced = [it for it in items if it.get("price_num", 0) == 0]
+                valid_priced.sort(key=lambda x: x["price_num"])
+                items = valid_priced + unpriced
+
+            logger.info(f"[M5] Extracted {len(items)} items from page '{self._page.url}'")
+            return items
+        except Exception as exc:
+            logger.warning(f"[M5] In-page extraction failed: {exc}")
+            return []
+
     # ── State Capture ─────────────────────────────────────────────────────────
 
     async def _capture_state(
         self, run_id: str, step_index: int, take_screenshot: bool
     ) -> dict[str, Any]:
-        """Defensively capture current page URL, title, accessibility tree, and optional screenshot."""
+        """Defensively capture current page URL, title, accessibility tree, extracted items, and optional screenshot."""
         page = self._page
 
         url = ""
@@ -697,6 +928,21 @@ class BrowserExecutor:
                 logger.debug(f"[M5] Accessibility snapshot failed: {acc_err}")
                 acc_tree = {}
 
+        # Automated product/link extraction on result pages
+        extracted_items = []
+        direct_link = None
+        if self._last_extracted_items:
+            extracted_items = list(self._last_extracted_items)
+            direct_link = extracted_items[0].get("url")
+            self._last_extracted_items = []
+        elif page and not page.is_closed() and any(k in (url or "").lower() for k in ("search", "s?", "/p/", "/dp/", "results", "query")):
+            try:
+                extracted_items = await self._extract_page_products_or_items()
+                if extracted_items:
+                    direct_link = extracted_items[0].get("url")
+            except Exception:
+                extracted_items = []
+
         # Optional Screenshot
         screenshot_path = None
         if take_screenshot and page and not page.is_closed():
@@ -710,6 +956,8 @@ class BrowserExecutor:
             "title": title,
             "accessibility_tree": acc_tree,
             "screenshot_path": screenshot_path,
+            "extracted_items": extracted_items,
+            "direct_link": direct_link,
         }
 
     async def _save_screenshot(self, run_id: str, step_index: int) -> str | None:

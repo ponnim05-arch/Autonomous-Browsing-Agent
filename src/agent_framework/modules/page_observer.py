@@ -73,7 +73,9 @@ class PageObserver:
             )
 
         # Generate summary text
-        summary = self._generate_summary(url, title, elements, prev_state)
+        extracted_items = raw_state.get("extracted_items", [])
+        direct_link = raw_state.get("direct_link")
+        summary = self._generate_summary(url, title, elements, prev_state, extracted_items)
 
         page_state = PageState(
             url=url,
@@ -82,11 +84,13 @@ class PageObserver:
             summary_text=summary,
             screenshot_path=screenshot_path,
             raw_html_length=len(str(tree)),
+            extracted_items=extracted_items,
+            direct_link=direct_link,
         )
 
         logger.info(
             f"[M6] Observed page: '{title[:60]}' | "
-            f"{len(elements)} interactive elements | url={url[:80]}"
+            f"{len(elements)} interactive elements | {len(extracted_items)} items extracted | url={url[:80]}"
         )
         return page_state
 
@@ -96,6 +100,7 @@ class PageObserver:
         title: str,
         elements,
         prev_state: PageState | None = None,
+        extracted_items: list[dict[str, Any]] | None = None,
     ) -> str:
         """Generate a brief natural-language summary of the page state."""
         roles = {}

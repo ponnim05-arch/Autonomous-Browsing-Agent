@@ -116,17 +116,28 @@ class Verifier:
                 confidence_score=0.95,
             ), 0
 
-        if not page_state.interactive_elements:
+        # Check for successful product / item extraction
+        if page_state.extracted_items:
+            top_item = page_state.extracted_items[0]
+            top_desc = f"{top_item.get('title', '')[:45]} | {top_item.get('price', '')}"
+            return VerificationResult(
+                status="success",
+                reason=f"Extracted {len(page_state.extracted_items)} items. Top: {top_desc}",
+                expected_outcome=expected_outcome,
+                confidence_score=0.95,
+            ), 0
+
+        if not page_state.interactive_elements and not page_state.title:
             return VerificationResult(
                 status="partial",
-                reason="No interactive elements on page — may be loading or blank",
+                reason="No content or interactive elements on page — may be loading or blank",
                 expected_outcome=expected_outcome,
                 confidence_score=0.50,
             ), 0
 
         return VerificationResult(
             status="success",
-            reason=f"Checkpoint verified on '{page_state.title}' with {len(page_state.interactive_elements)} elements",
+            reason=f"Checkpoint verified on '{page_state.title}' ({len(page_state.interactive_elements)} elements)",
             expected_outcome=expected_outcome,
             confidence_score=0.90,
         ), 0
@@ -169,9 +180,17 @@ class Verifier:
                 confidence_score=0.85,
             )
 
-        # Check 3: Extract — did we get any content?
+        # Check 3: Extract — did we get any structured items or content?
         if action.action == "extract":
-            if action.value and len(action.value.strip()) > 10:
+            if page.extracted_items:
+                top_item = page.extracted_items[0]
+                return VerificationResult(
+                    status="success",
+                    reason=f"Extracted {len(page.extracted_items)} items. Direct link: {top_item.get('url')}",
+                    expected_outcome="Direct product and price extraction",
+                    confidence_score=0.95,
+                )
+            if action.value and len(action.value.strip()) > 10 and action.value != "[]":
                 return VerificationResult(
                     status="success",
                     reason=f"Data extracted ({len(action.value)} chars)",
@@ -180,13 +199,19 @@ class Verifier:
                 )
             return VerificationResult(
                 status="partial",
-                reason="Extract action produced empty or minimal result",
+                reason="Extract action completed (waiting for result items)",
                 expected_outcome="Non-empty extracted data",
                 confidence_score=0.60,
             )
 
         # Check 4: No elements on page (stuck?)
-        if not page.interactive_elements:
+        if not page.interactive_elements and not page.extracted_items and not page.title:
+            return VerificationResult(
+                status="partial",
+                reason="No interactive elements found on page — may be loading or blank",
+                expected_outcome="Page with interactive elements",
+                confidence_score=0.50,
+            )
             return VerificationResult(
                 status="partial",
                 reason="No interactive elements found on page — may be loading or blank",

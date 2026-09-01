@@ -86,10 +86,16 @@ _PLAN_PROMPT = """You are a browser automation planner. Given a user task, outpu
 RULES:
 - Output ONLY valid JSON, no explanation
 - Each step is a browser action: navigate, fill, click, scroll, extract, wait
-- "target" = element description (text label, role, or placeholder)
-- "value" = URL for navigate, text for fill, null otherwise
+- "target" = element description (text label, role, or placeholder: e.g. "search_input", "search_button", "cheapest_product")
+- "value" = URL for navigate, text for fill, extraction spec for extract (e.g. "cheapest", "products"), null otherwise
 - Mark important verification points as "checkpoint": true
-- Keep plans short: 3-8 steps maximum
+- For search tasks on e-commerce / sites:
+  1. navigate to store / site URL
+  2. fill search box with query (automatically submits search)
+  3. scroll or wait (brief pause for results to settle)
+  4. extract items / prices / direct links (with checkpoint: true)
+  5. click first_product or cheapest_product if the user asks to open/view the product
+- Keep plans concise: 3-6 steps maximum
 - The last step should be a checkpoint
 
 USER TASK: {task}
@@ -100,9 +106,9 @@ Output JSON:
   "domain": "<topic>",
   "success_criteria": "<what success looks like>",
   "steps": [
-    {{"action": "navigate", "target": "", "value": "<url>", "checkpoint": false, "description": "<what>"}},
-    {{"action": "fill", "target": "<element desc>", "value": "<text>", "checkpoint": false, "description": "<what>"}},
-    {{"action": "click", "target": "<element desc>", "value": "", "checkpoint": true, "description": "<what>"}}
+    {{"action": "navigate", "target": "", "value": "<url>", "checkpoint": false, "description": "Go to website"}},
+    {{"action": "fill", "target": "search_input", "value": "<search text>", "checkpoint": false, "description": "Search for query"}},
+    {{"action": "extract", "target": "cheapest_product", "value": "cheapest", "checkpoint": true, "description": "Extract product details and direct link"}}
   ]
 }}"""
 

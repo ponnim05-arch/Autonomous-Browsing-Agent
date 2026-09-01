@@ -357,6 +357,7 @@ elif page == "🤖 Agent View":
             run_id = run_async(exp_logger.start_run(goal_text, strategy_name))
             st.session_state.active_run_id = run_id
             st.session_state.run_log = []
+            st.session_state.extracted_products = []
 
             progress = st.progress(0, text="Starting execution...")
             start_time = time.time()
@@ -405,6 +406,13 @@ elif page == "🤖 Agent View":
                                     metrics.record_screenshot()
 
                                 page_state = observer.observe(raw_state, task_keywords=[plan.domain, plan.task_type], prev_state=prev_page)
+                                
+                                # Capture any extracted items or direct links
+                                if page_state.extracted_items:
+                                    for item in page_state.extracted_items:
+                                        if item not in st.session_state.extracted_products:
+                                            st.session_state.extracted_products.append(item)
+
                                 state_mgr.update(
                                     url=page_state.url,
                                     title=page_state.title,
@@ -447,6 +455,7 @@ elif page == "🤖 Agent View":
                                     "reason": ver_reason,
                                     "strategy": "plan_then_execute",
                                     "screenshot": page_state.screenshot_path if is_cp else None,
+                                    "direct_link": page_state.direct_link,
                                 })
 
                                 prev_page = page_state
@@ -504,6 +513,11 @@ elif page == "🤖 Agent View":
 
                                     raw_state2 = await browser.execute(action_obj, run_id=run_id, step_index=step_idx)
                                     page_state_after = observer.observe(raw_state2)
+                                    
+                                    if page_state_after.extracted_items:
+                                        for item in page_state_after.extracted_items:
+                                            if item not in st.session_state.extracted_products:
+                                                st.session_state.extracted_products.append(item)
 
                                     verification, ver_tokens = await verifier.verify(
                                         goal_obj, sub_task, action_obj,
@@ -529,6 +543,7 @@ elif page == "🤖 Agent View":
                                         "reason": verification.reason,
                                         "strategy": strategy_ctx.strategy_id,
                                         "screenshot": page_state_after.screenshot_path,
+                                        "direct_link": page_state_after.direct_link,
                                     })
 
                                     last_verification = verification
@@ -599,6 +614,21 @@ elif page == "🤖 Agent View":
             except Exception as e:
                 st.error(f"❌ **Agent Execution Error:** {e}")
                 run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
+
+        # Show Extracted Products & Direct Links if available
+        if st.session_state.get("extracted_products"):
+            st.subheader("🛍️ Extracted Products & Direct Links")
+            prods = st.session_state.extracted_products
+            for idx, prod in enumerate(prods, 1):
+                with st.container(border=True):
+                    p1, p2, p3 = st.columns([5, 3, 2])
+                    p1.markdown(f"**#{idx} {prod.get('title', 'Unknown Product')}**")
+                    price_info = f"💰 **{prod.get('price', 'N/A')}**"
+                    if prod.get("rating"):
+                        price_info += f" | ⭐ {prod.get('rating')}"
+                    p2.markdown(price_info)
+                    if prod.get("url"):
+                        p3.link_button("🔗 Direct Product Link", prod["url"], use_container_width=True)
 
         # Show Performance Scorecard if metrics are available
         if st.session_state.last_metrics:
