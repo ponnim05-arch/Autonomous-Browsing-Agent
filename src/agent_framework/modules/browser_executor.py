@@ -410,8 +410,15 @@ class BrowserExecutor:
                 locale="en-IN",
             )
 
-        # 3. Verify page
-        if not self._page or self._page.is_closed():
+        # 3. Verify page & auto-select latest active tab
+        if self._context and self._context.pages:
+            # Switch to most recent non-closed tab
+            valid_pages = [p for p in self._context.pages if not p.is_closed()]
+            if valid_pages:
+                self._page = valid_pages[-1]
+            else:
+                self._page = await self._context.new_page()
+        elif not self._page or self._page.is_closed():
             logger.warning("[M5] Browser page was closed or missing. Creating a new page to recover session...")
             self._page = await self._context.new_page()
 
@@ -569,7 +576,11 @@ class BrowserExecutor:
                 raise ValueError("Navigate action requires a valid URL value.")
             if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("about:"):
                 url = "https://" + url
-            await page.goto(url, timeout=self.config.page_load_timeout_ms)
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=self.config.page_load_timeout_ms)
+            except Exception as goto_err:
+                logger.warning(f"[M5] Fast goto with domcontentloaded failed: {goto_err}. Retrying standard goto...")
+                await page.goto(url, timeout=self.config.page_load_timeout_ms)
 
         elif act == "scroll":
             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
@@ -639,20 +650,20 @@ class BrowserExecutor:
                 # Auto-dismiss popups after navigation
                 await self._dismiss_popups()
             elif action.action == "click":
+                # Check if clicking opened a new tab/window (e.g. Amazon target="_blank" product links)
+                if self._context and len(self._context.pages) > 1:
+                    latest = self._context.pages[-1]
+                    if latest != self._page and not latest.is_closed():
+                        logger.info(f"[M5] New tab opened after click: '{latest.url}'. Switching active page.")
+                        self._page = latest
                 # After clicking products/cart/buy, wait for new page to settle
                 try:
                     await self._page.wait_for_load_state(
-                        "networkidle",
-                        timeout=min(self.config.page_load_timeout_ms, 8000),
+                        "domcontentloaded",
+                        timeout=min(self.config.page_load_timeout_ms, 5000),
                     )
                 except Exception:
-                    try:
-                        await self._page.wait_for_load_state(
-                            "domcontentloaded",
-                            timeout=3000,
-                        )
-                    except Exception:
-                        pass
+                    pass
             elif action.action in ("type", "fill"):
                 await asyncio.sleep(0.5)
             elif action.action == "extract":
@@ -1039,6 +1050,19 @@ class BrowserExecutor:
                 return el
             except Exception:
                 continue
+
+        # 13. Cross-tab search fallback: if element not on current page, check other open tabs
+        if self._context and len(self._context.pages) > 1:
+            for other_page in reversed(self._context.pages):
+                if other_page != page and not other_page.is_closed():
+                    try:
+                        el = other_page.locator(selector).first
+                        if await el.is_visible(timeout=1000):
+                            logger.info(f"[M5] Element '{selector}' found on another tab ({other_page.url}). Switching active page.")
+                            self._page = other_page
+                            return el
+                    except Exception:
+                        pass
 
         logger.warning(f"[M5] Element not found after all strategies: {selector}")
         return None
