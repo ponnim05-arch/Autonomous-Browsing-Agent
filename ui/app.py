@@ -70,6 +70,12 @@ if "active_run_id" not in st.session_state:
     st.session_state.active_run_id = None
 if "last_metrics" not in st.session_state:
     st.session_state.last_metrics = None
+if "active_url" not in st.session_state:
+    st.session_state.active_url = None
+if "active_page_title" not in st.session_state:
+    st.session_state.active_page_title = None
+if "active_screenshot" not in st.session_state:
+    st.session_state.active_screenshot = None
 
 config = AgentConfig()
 evaluator = Evaluator(config)
@@ -392,21 +398,27 @@ elif page == "🤖 Agent View":
                                 is_cp = planned_step.checkpoint or (i == len(plan.steps) - 1)
                                 step_start = time.time()
 
-                                # Execute single action in browser (deterministic, no LLM call!)
+                                # Execute single action in browser (capture screenshot on every step for live visual view)
                                 raw_state = await browser.execute(
                                     action_obj,
                                     run_id=run_id,
                                     step_index=i,
-                                    screenshot=is_cp,
+                                    screenshot=True,
                                 )
                                 act_duration = (time.time() - step_start) * 1000
                                 p_actions += 1
                                 metrics.record_browser_action(action_obj.action, success=raw_state.get("action_success", True), duration_ms=act_duration)
-                                if is_cp:
-                                    metrics.record_screenshot()
+                                metrics.record_screenshot()
 
                                 page_state = observer.observe(raw_state, task_keywords=[plan.domain, plan.task_type], prev_state=prev_page)
                                 
+                                # Store active website details for live app view
+                                if page_state.url:
+                                    st.session_state.active_url = page_state.url
+                                    st.session_state.active_page_title = page_state.title
+                                if page_state.screenshot_path:
+                                    st.session_state.active_screenshot = page_state.screenshot_path
+
                                 # Capture any extracted items or direct links
                                 if page_state.extracted_items:
                                     for item in page_state.extracted_items:
@@ -614,6 +626,20 @@ elif page == "🤖 Agent View":
             except Exception as e:
                 st.error(f"❌ **Agent Execution Error:** {e}")
                 run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
+
+        # Show Active Task Website & Live Visual Browser Window
+        if st.session_state.get("active_url"):
+            st.subheader("🌐 Active Task Website (Live View)")
+            with st.container(border=True):
+                w_col1, w_col2 = st.columns([4, 1])
+                curr_title = st.session_state.get("active_page_title") or "Website Loaded"
+                w_col1.markdown(f"### 🔗 [{curr_title}]({st.session_state.active_url})")
+                w_col1.caption(f"**Direct Link:** `{st.session_state.active_url}`")
+                w_col2.link_button("🚀 Open Website in Tab", st.session_state.active_url, width="stretch")
+                
+                active_img = st.session_state.get("active_screenshot")
+                if active_img and Path(active_img).exists():
+                    st.image(active_img, caption=f"Active Browser Viewport — {curr_title}", width="stretch")
 
         # Show Extracted Products & Direct Links if available
         if st.session_state.get("extracted_products"):
