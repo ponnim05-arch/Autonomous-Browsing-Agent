@@ -25,6 +25,7 @@ from ..models import (
     SubTask, StrategyContext, VerificationResult
 )
 from ..modules.prompt_generator import PromptGenerator
+from ..utils.json_extractor import extract_json_data
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,8 @@ class Verifier:
         page_state: PageState,
         previous_page_state: Optional[PageState] = None,
         action_desc: str = "",
+        action_success: bool = True,
+        action_error: Optional[str] = None,
     ) -> tuple[VerificationResult, int]:
         """
         Fast checkpoint validator for batch execution.
@@ -107,6 +110,14 @@ class Verifier:
         Evaluates if the page is in a healthy, successful state according
         to the expected outcome without unnecessary LLM calls.
         """
+        if not action_success:
+            return VerificationResult(
+                status="failure",
+                reason=f"Action failed: {action_error or 'Element not found or interaction failed'}",
+                expected_outcome=expected_outcome,
+                confidence_score=0.95,
+            ), 0
+
         title_lower = page_state.title.lower()
         if any(sig in title_lower for sig in _ERROR_SIGNALS):
             return VerificationResult(
@@ -116,8 +127,38 @@ class Verifier:
                 confidence_score=0.95,
             ), 0
 
+        # Check for multi-item cart action
+        is_cart_action = any(k in action_desc.lower() for k in ("cart", "buy"))
+        if is_cart_action and page_state.extracted_items:
+            cart_items = [it for it in page_state.extracted_items if "cart_status" in it]
+            if cart_items:
+                added = sum(1 for it in cart_items if it.get("cart_status") == "added")
+                total = len(cart_items)
+                pct = int((added / total) * 100) if total > 0 else 0
+                if added == total and total > 0:
+                    return VerificationResult(
+                        status="success",
+                        reason=f"All {total} items successfully added to cart (100% completed)!",
+                        expected_outcome=expected_outcome,
+                        confidence_score=0.98,
+                    ), 0
+                elif added > 0:
+                    return VerificationResult(
+                        status="partial",
+                        reason=f"Added {added} of {total} items to cart ({pct}% completed)",
+                        expected_outcome=expected_outcome,
+                        confidence_score=0.95,
+                    ), 0
+                else:
+                    return VerificationResult(
+                        status="failure",
+                        reason=f"Failed to add any of the {total} items to cart (0% completed)",
+                        expected_outcome=expected_outcome,
+                        confidence_score=0.95,
+                    ), 0
+
         # Check for successful product / item extraction
-        if page_state.extracted_items:
+        if not is_cart_action and page_state.extracted_items:
             top_item = page_state.extracted_items[0]
             top_desc = f"{top_item.get('title', '')[:45]} | {top_item.get('price', '')}"
             return VerificationResult(
@@ -204,7 +245,49 @@ class Verifier:
                 confidence_score=0.60,
             )
 
-        # Check 4: Click on interactive PA targets (cart, buy, book)
+        # Check 4: Multi-item cart action
+        if action.action in ("add_all_to_cart", "add_multiple_to_cart") or (
+            action.action == "click" and any(k in (action.selector or "").lower() for k in ("add_all_to_cart", "add all", "add_them_to_cart", "add them"))
+        ):
+            if page.extracted_items:
+                cart_items = [it for it in page.extracted_items if "cart_status" in it]
+                if cart_items:
+                    added = sum(1 for it in cart_items if it.get("cart_status") == "added")
+                    total = len(cart_items)
+                    pct = int((added / total) * 100) if total > 0 else 0
+                    if added == total and total > 0:
+                        return VerificationResult(
+                            status="success",
+                            reason=f"All {total} items successfully added to cart (100% completed)!",
+                            expected_outcome=f"All {total} items added to cart",
+                            confidence_score=0.98,
+                        )
+                    elif added > 0:
+                        return VerificationResult(
+                            status="partial",
+                            reason=f"Added {added} of {total} items to cart ({pct}% completed)",
+                            expected_outcome=f"All {total} items added to cart",
+                            confidence_score=0.95,
+                        )
+                    else:
+                        return VerificationResult(
+                            status="failure",
+                            reason=f"Failed to add any of the {total} items to cart (0% completed)",
+                            expected_outcome=f"Items added to cart",
+                            confidence_score=0.95,
+                        )
+            if action.value:
+                m = re.search(r'\((\d{1,3})%\s*completed\)', action.value)
+                if m:
+                    pct = int(m.group(1))
+                    if pct == 100:
+                        return VerificationResult(status="success", reason=action.value, expected_outcome="All items added to cart", confidence_score=0.95)
+                    elif pct > 0:
+                        return VerificationResult(status="partial", reason=action.value, expected_outcome="All items added to cart", confidence_score=0.92)
+                    else:
+                        return VerificationResult(status="failure", reason=action.value, expected_outcome="All items added to cart", confidence_score=0.90)
+
+        # Check 5: Click on interactive PA targets (cart, buy, book)
         if action.action == "click":
             sel_lower = (action.selector or "").lower()
             pa_targets = ("add_to_cart", "buy_now", "book_now", "cart_button",
@@ -250,17 +333,16 @@ class Verifier:
 
     def _parse_verification(self, text: str) -> VerificationResult:
         """Parse LLM verification response into VerificationResult."""
-        json_match = re.search(r"\{[\s\S]*?\}", text)
-        if not json_match:
+        data = extract_json_data(text)
+        if not data or not isinstance(data, dict):
             return VerificationResult(
                 status="partial",
                 reason="Could not parse LLM verification response",
                 confidence_score=0.30,
             )
         try:
-            data = json.loads(json_match.group())
             return VerificationResult(**data)
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (TypeError, ValueError):
             return VerificationResult(
                 status="partial",
                 reason="Verification response malformed",

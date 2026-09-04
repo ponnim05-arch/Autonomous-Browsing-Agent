@@ -22,6 +22,7 @@ import re
 from ..config import AgentConfig, default_config
 from ..llm_client import LLMClient
 from ..models import RepairAmendment, RepairInput
+from ..utils.json_extractor import extract_json_data
 
 logger = logging.getLogger(__name__)
 
@@ -120,14 +121,13 @@ class RepairEngine:
         )
 
     def _parse_amendment(self, text: str, attempt_number: int) -> RepairAmendment:
-        json_match = re.search(r"\{[\s\S]*?\}", text)
-        if not json_match:
+        data = extract_json_data(text)
+        if not data or not isinstance(data, dict):
             return self._fallback_amendment(attempt_number)
         try:
-            data = json.loads(json_match.group())
             data["retry_count"] = attempt_number
             return RepairAmendment(**data)
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (TypeError, ValueError):
             return self._fallback_amendment(attempt_number)
 
     @staticmethod

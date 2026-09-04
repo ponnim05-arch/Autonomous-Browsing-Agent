@@ -78,6 +78,14 @@ class AgentConfig:
     auto_escalate_on_retry: bool = True
 
     # ── Browser ────────────────────────────────────────────────────
+    # Unified browser mode: "visible" | "headless" | "cdp"
+    # This is the primary control. It derives headless + browser_connection_mode.
+    browser_mode: str = field(
+        default_factory=lambda: os.getenv("BROWSER_MODE", "visible").lower()
+    )
+    keep_browser_open: bool = field(
+        default_factory=lambda: os.getenv("KEEP_BROWSER_OPEN", "false").lower() == "true"
+    )
     headless: bool = field(
         default_factory=lambda: os.getenv("HEADLESS", "false").lower() == "true"
     )
@@ -92,6 +100,24 @@ class AgentConfig:
     )
     action_timeout_ms: int = 10_000
     page_load_timeout_ms: int = 30_000
+    reuse_browser: bool = field(
+        default_factory=lambda: os.getenv("REUSE_BROWSER", "false").lower() == "true"
+    )
+
+    def __post_init__(self):
+        """Derive headless and browser_connection_mode from browser_mode for consistency."""
+        mode = self.browser_mode.lower()
+        if mode == "visible":
+            self.headless = False
+            self.browser_connection_mode = "playwright"
+        elif mode == "headless":
+            self.headless = True
+            self.browser_connection_mode = "playwright"
+        elif mode == "cdp":
+            self.headless = False
+            self.browser_connection_mode = "cdp"
+        # If browser_mode is not one of the above, fall back to
+        # whatever HEADLESS / BROWSER_CONNECTION_MODE env vars provide.
 
     # ── Safety ─────────────────────────────────────────────────────
     # PA mode: allow cart/checkout — only block final payment submission

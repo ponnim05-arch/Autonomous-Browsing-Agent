@@ -1,11 +1,11 @@
 """
-Module 12 — Streamlit UI (Optimized)
-======================================
+Module 12 — Streamlit UI (Optimized + Browser Display)
+========================================================
 4-page interactive interface for the Adaptive Prompt Engineering Framework.
 
 Pages:
-    🏠 Home          – Goal input, strategy & model selection, plan preview
-    🤖 Agent View    – Live step-by-step monitor, batch execution, screenshots
+    🏠 Home          – Goal input, strategy & model selection, browser mode, plan preview
+    🤖 Agent View    – Live step-by-step monitor, browser status, batch execution, screenshots
     📊 Dashboard     – Strategy comparison charts (Plotly)
     🔍 Run Inspector – Full trace viewer: prompts, repairs, actions, performance scorecard
 
@@ -33,7 +33,18 @@ import streamlit as st
 # ── Path setup (allow running from project root) ─────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+# ── Force reload agent_framework modules so Streamlit picks up code updates without requiring a server restart ──
+for _mod_name in list(sys.modules.keys()):
+    if _mod_name.startswith("agent_framework"):
+        del sys.modules[_mod_name]
+
+import re
+
 from agent_framework.config import AgentConfig
+from agent_framework.models import (
+    ActionObject, GoalObject, PageState, PromptContext,
+    SubTask, StrategyContext, VerificationResult, RepairInput,
+)
 from agent_framework.modules.evaluator import Evaluator
 from agent_framework.modules.intent_parser import IntentParser
 from agent_framework.modules.task_decomposer import TaskDecomposer
@@ -64,18 +75,27 @@ st.set_page_config(
 )
 
 # ── Global State ──────────────────────────────────────────────────────────────
-if "run_log" not in st.session_state:
-    st.session_state.run_log = []
-if "active_run_id" not in st.session_state:
-    st.session_state.active_run_id = None
-if "last_metrics" not in st.session_state:
-    st.session_state.last_metrics = None
-if "active_url" not in st.session_state:
-    st.session_state.active_url = None
-if "active_page_title" not in st.session_state:
-    st.session_state.active_page_title = None
-if "active_screenshot" not in st.session_state:
-    st.session_state.active_screenshot = None
+_DEFAULT_STATE = {
+    "nav_page": "🏠 Home",
+    "run_log": [],
+    "active_run_id": None,
+    "last_metrics": None,
+    "active_url": None,
+    "active_page_title": None,
+    "active_screenshot": None,
+    # Browser display state (serializable only — no Playwright objects)
+    "browser_active": False,
+    "browser_mode": "visible",
+    "browser_started": False,
+    "browser_error": None,
+    "current_url": None,
+    "current_title": None,
+    "current_action": None,
+    "browser_status_log": [],
+}
+for key, default in _DEFAULT_STATE.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 config = AgentConfig()
 evaluator = Evaluator(config)
@@ -122,7 +142,66 @@ def strategy_badge(strategy: str) -> str:
     return f"{colors.get(strategy, '⚪')} {strategy}"
 
 
+def make_status_callback():
+    """
+    Create a status callback that writes serializable state to a shared dict.
+
+    Because async browser execution runs on a worker thread, we cannot write
+    to st.session_state directly (Streamlit's ScriptRunContext is thread-local).
+    Instead we write to a plain dict and sync it back on the main thread after
+    the async work completes.
+    """
+    status_data = {
+        "current_url": None,
+        "current_title": None,
+        "current_action": None,
+        "browser_started": False,
+        "browser_error": None,
+        "log": [],
+    }
+
+    def callback(event: str, message: str, url=None):
+        status_data["log"].append(message)
+        if url:
+            status_data["current_url"] = url
+        if event == "browser_started":
+            status_data["browser_started"] = True
+        elif event == "browser_error":
+            status_data["browser_error"] = message
+        elif event in ("navigating", "page_loaded"):
+            if url:
+                status_data["current_url"] = url
+        if event == "page_loaded":
+            # Extract title from message pattern "📄 Title"
+            title = message.replace("📄 ", "").strip()
+            status_data["current_title"] = title
+        if event == "action":
+            status_data["current_action"] = message
+
+    return callback, status_data
+
+
+def sync_status_to_session(status_data: dict):
+    """Copy status_data back to session_state on the main thread."""
+    st.session_state.current_url = status_data.get("current_url")
+    st.session_state.current_title = status_data.get("current_title")
+    st.session_state.current_action = status_data.get("current_action")
+    st.session_state.browser_started = status_data.get("browser_started", False)
+    st.session_state.browser_error = status_data.get("browser_error")
+    st.session_state.browser_status_log = status_data.get("log", [])
+
+
+def navigate_to(page_name: str):
+    """Safely queue programmatic navigation to another page and trigger rerun."""
+    st.session_state.pending_nav_page = page_name
+    st.rerun()
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
+
+# Apply any queued programmatic navigation BEFORE the radio widget is instantiated
+if "pending_nav_page" in st.session_state:
+    st.session_state.nav_page = st.session_state.pop("pending_nav_page")
 
 with st.sidebar:
     st.title("⚡ Fast Browser Agent")
@@ -131,12 +210,13 @@ with st.sidebar:
     page = st.radio(
         "Navigate",
         ["🏠 Home", "🤖 Agent View", "📊 Dashboard", "🔍 Run Inspector"],
+        key="nav_page",
         label_visibility="collapsed",
     )
     st.divider()
     st.caption(f"Fast Model: `{config.fast_model}`")
     st.caption(f"Reasoning Model: `{config.reasoning_model}`")
-    st.caption(f"Browser: `{config.browser_type}` ({config.browser_connection_mode})")
+    st.caption(f"Browser: `{config.browser_type}` | Mode: `{config.browser_mode}`")
     st.caption(f"Batch Execution: `{'Enabled' if config.enable_batch_execution else 'Disabled'}`")
     st.caption(f"Storage: `{config.storage_backend}`")
 
@@ -144,6 +224,7 @@ with st.sidebar:
         diag = BrowserExecutor.get_diagnostics(config)
         st.write(f"**Python:** `{diag['python_version']}`")
         st.write(f"**Playwright:** `{diag['playwright_version'] or 'Not installed'}`")
+        st.write(f"**Browser Mode:** `{diag['browser_mode']}`")
         st.write(f"**Framework Src:** `{'Local src' if diag['is_local_src'] else 'site-packages'}`")
         st.code(diag['agent_framework_path'], language="text")
 
@@ -189,28 +270,39 @@ if page == "🏠 Home":
             ],
             index=0,
         )
+
+        # ── Unified Browser Mode ─────────────────────────────────────────────
+        browser_mode_choice = st.selectbox(
+            "🌐 Browser Mode",
+            [
+                "visible (👁️ Visible Browser — Recommended)",
+                "headless (🔇 Headless / Background)",
+                "cdp (🔌 Connect to Existing Chrome / CDP)",
+            ],
+            index=0,
+            help="Visible: opens a real browser window you can watch. Headless: runs invisibly. CDP: connects to Chrome already running with --remote-debugging-port.",
+        )
         browser_choice = st.selectbox(
-            "Browser",
+            "Browser Type",
             ["chromium", "msedge", "chrome", "firefox", "webkit"],
             index=0,
         )
-        conn_mode_choice = st.selectbox(
-            "Connection Mode",
-            [
-                "playwright (Dedicated Browser Instance)",
-                "cdp (Connect to existing Chrome via CDP)",
-            ],
-            index=0,
-            help="Playwright launches a clean, separate browser. CDP connects to Chrome already running with --remote-debugging-port.",
+        keep_open = st.checkbox(
+            "🔓 Keep browser open across tasks (same window)",
+            value=True,
+            help="Keep the browser window open across tasks so all actions execute in the same window without reopening.",
         )
+
+        # CDP-specific settings
         cdp_endpoint = "http://127.0.0.1:9222"
-        if "cdp" in conn_mode_choice:
+        clean_browser_mode = browser_mode_choice.split(" ")[0].strip()
+        if clean_browser_mode == "cdp":
             cdp_endpoint = st.text_input(
                 "CDP Endpoint",
                 value="http://127.0.0.1:9222",
                 help="Start Chrome with: chrome.exe --remote-debugging-port=9222",
             )
-        headless = st.checkbox("Background / Headless browser", value=False, help="Run browser completely in the background without opening a visible window")
+
         api_key_override = st.text_input(
             "API Key (Optional override)",
             type="password",
@@ -220,9 +312,69 @@ if page == "🏠 Home":
 
     clean_strategy = strategy_mode.split(" ")[0].strip()
 
-    if st.button("▶ Plan & Queue Task", type="primary", width="stretch"):
+    # ── Open Website Button ──────────────────────────────────────────────────
+    with st.expander("🌐 Pre-launch Browser (Optional)", expanded=False):
+        st.caption("Launch the browser before starting task execution. Subsequent tasks will run in this same window.")
+        pre_url = st.text_input(
+            "URL to open",
+            value="https://www.google.com",
+            placeholder="https://www.google.com",
+            key="pre_launch_url",
+        )
+        col_open, col_close = st.columns([1, 1])
+        with col_open:
+            if st.button("👁️ Open Browser", key="open_browser_btn", use_container_width=True):
+                clean_model = model_choice.split(" ")[0].strip()
+
+                os.environ["BROWSER_MODE"] = clean_browser_mode
+                os.environ["HEADLESS"] = "true" if clean_browser_mode == "headless" else "false"
+                os.environ["BROWSER_TYPE"] = browser_choice
+                os.environ["KEEP_BROWSER_OPEN"] = "true"
+                os.environ["REUSE_BROWSER"] = "true"
+                if clean_browser_mode == "cdp":
+                    os.environ["BROWSER_CONNECTION_MODE"] = "cdp"
+                    os.environ["CDP_ENDPOINT"] = cdp_endpoint
+                else:
+                    os.environ["BROWSER_CONNECTION_MODE"] = "playwright"
+
+                pre_config = AgentConfig()
+
+                async def _open_preview():
+                    from agent_framework.models import ActionObject
+                    from agent_framework.modules.browser_executor import BrowserExecutor
+                    async with BrowserExecutor(pre_config, reuse_session=True) as browser:
+                        action = ActionObject(action="navigate", value=pre_url)
+                        result = await browser.execute(action, run_id="preview", step_index=0, screenshot=True)
+                        return result
+
+                try:
+                    with st.spinner(f"🌐 Opening {pre_url}..."):
+                        result = run_async(_open_preview())
+                    st.success(f"✅ Browser open: **{result.get('title', 'Page')}**")
+                    st.caption(f"URL: `{result.get('url', pre_url)}`")
+                    if result.get("screenshot_path") and Path(result["screenshot_path"]).exists():
+                        st.image(result["screenshot_path"], caption="Browser Preview")
+                except BrowserStartupError as bse:
+                    st.error(f"❌ Browser startup failed: {bse}")
+                    if bse.suggested_fix:
+                        st.info(f"💡 {bse.suggested_fix}")
+                except Exception as e:
+                    st.error(f"❌ Could not open browser: {e}")
+
+        with col_close:
+            if st.button("🛑 Close Browser Window", key="close_browser_window_btn", use_container_width=True):
+                from agent_framework.modules.browser_executor import BrowserExecutor
+                run_async(BrowserExecutor.close_shared_session())
+                st.success("✅ Browser window closed.")
+
+    col_sub1, col_sub2 = st.columns([2, 1])
+    with col_sub1:
+        run_now = st.button("🚀 Plan & Execute in Browser Now", type="primary", use_container_width=True)
+    with col_sub2:
+        plan_only = st.button("📋 Plan Only (Preview Steps)", use_container_width=True)
+
+    if run_now or plan_only:
         clean_model = model_choice.split(" ")[0].strip()
-        clean_conn = "cdp" if "cdp" in conn_mode_choice else "playwright"
 
         # Determine provider from model
         if any(k in clean_model for k in ("meta/", "mistralai/", "nvidia", "openai/gpt-oss")):
@@ -236,13 +388,18 @@ if page == "🏠 Home":
 
         os.environ["LLM_PROVIDER"] = provider
         os.environ["LLM_MODEL"] = clean_model
-        os.environ["FAST_MODEL"] = "meta/llama-3.2-11b-vision-instruct"
-        os.environ["REASONING_MODEL"] = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+        os.environ["FAST_MODEL"] = "meta/llama-3.2-11b-vision-instruct" if provider == "nvidia" else clean_model
+        os.environ["REASONING_MODEL"] = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" if provider == "nvidia" else clean_model
         os.environ["EXPERIMENT_STRATEGY"] = clean_strategy
         os.environ["BROWSER_TYPE"] = browser_choice
-        os.environ["BROWSER_CONNECTION_MODE"] = clean_conn
-        os.environ["CDP_ENDPOINT"] = cdp_endpoint
-        os.environ["HEADLESS"] = str(headless).lower()
+        os.environ["BROWSER_MODE"] = clean_browser_mode
+        os.environ["HEADLESS"] = "true" if clean_browser_mode == "headless" else "false"
+        os.environ["KEEP_BROWSER_OPEN"] = str(keep_open).lower()
+        if clean_browser_mode == "cdp":
+            os.environ["BROWSER_CONNECTION_MODE"] = "cdp"
+            os.environ["CDP_ENDPOINT"] = cdp_endpoint
+        else:
+            os.environ["BROWSER_CONNECTION_MODE"] = "playwright"
 
         if api_key_override.strip():
             key_var = f"{provider.upper()}_API_KEY"
@@ -264,6 +421,9 @@ if page == "🏠 Home":
         elif not current_key or not current_key.strip():
             st.error(f"❌ No API key found for provider `{provider.upper()}`. Set `{provider.upper()}_API_KEY` in your `.env` file or paste it into the API Key box above.")
         else:
+            # Store browser mode in session state for Agent View
+            st.session_state.browser_mode = clean_browser_mode
+
             if clean_strategy == "plan_then_execute":
                 with st.spinner("⚡ Generating compact execution plan (1 fast LLM call)..."):
                     try:
@@ -275,11 +435,18 @@ if page == "🏠 Home":
                         st.session_state.pending_strategy = clean_strategy
                         st.session_state.pending_goal_text = goal_input
 
+                        if run_now:
+                            st.session_state.auto_start_execution = True
+                            navigate_to("🤖 Agent View")
+
                         st.success(
-                            f"✅ Plan generated in 1 LLM call ({tokens} tokens)! "
-                            f"**{len(plan.steps)} steps** ready for batch execution."
+                            f"📋 Action Plan generated in 1 LLM call ({tokens} tokens)! "
+                            f"**{len(plan.steps)} steps** queued."
                         )
-                        st.info("Navigate to **🤖 Agent View** to execute the plan.")
+                        st.warning("⚠️ **Note:** Plan is generated but not executed yet. Click below to run the actions in the browser:")
+                        if st.button("🚀 Proceed to Agent View & Execute", type="primary", key="goto_agent_view_plan"):
+                            st.session_state.auto_start_execution = True
+                            navigate_to("🤖 Agent View")
 
                         # Show steps
                         st.subheader("📋 Structured Action Plan")
@@ -304,11 +471,18 @@ if page == "🏠 Home":
                         st.session_state.pending_goal_text = goal_input
                         st.session_state.execution_plan = None
 
+                        if run_now:
+                            st.session_state.auto_start_execution = True
+                            navigate_to("🤖 Agent View")
+
                         st.success(
-                            f"✅ Goal parsed: **{goal_obj.task_type}** / {goal_obj.domain} "
-                            f"| {len(subtasks)} sub-tasks planned"
+                            f"📋 Goal parsed: **{goal_obj.task_type}** / {goal_obj.domain} "
+                            f"| {len(subtasks)} sub-tasks planned."
                         )
-                        st.info("Navigate to **🤖 Agent View** to run the agent live.")
+                        st.warning("⚠️ **Note:** Plan is generated but not executed yet. Click below to run the actions in the browser:")
+                        if st.button("🚀 Proceed to Agent View & Execute", type="primary", key="goto_agent_view_legacy"):
+                            st.session_state.auto_start_execution = True
+                            navigate_to("🤖 Agent View")
 
                         # Show decomposed sub-tasks
                         st.subheader("📋 Sub-task Plan")
@@ -318,7 +492,8 @@ if page == "🏠 Home":
                         st.error(f"❌ Error during planning: {e}")
 
     st.divider()
-    st.subheader("📜 Recent Runs")
+    st.subheader("📜 Previous Run History (Completed Past Sessions)")
+    st.caption("Showing history of previous completed sessions. To run a new task, click 'Plan & Execute in Browser Now' above.")
     try:
         history_df = run_async(evaluator.get_run_history(20))
         if history_df.empty:
@@ -354,9 +529,12 @@ elif page == "🤖 Agent View":
     else:
         st.markdown(f"**Goal:** {goal_text}")
         st.markdown(f"**Strategy:** {strategy_badge(strategy_name)}")
+        browser_mode_display = st.session_state.get("browser_mode", "visible")
+        st.markdown(f"**Browser Mode:** `{browser_mode_display}`")
         st.divider()
 
-        if st.button("🚀 Start Fast Execution", type="primary"):
+        auto_start = st.session_state.pop("auto_start_execution", False)
+        if st.button("🚀 Start Fast Execution", type="primary") or auto_start:
             run_config = AgentConfig()
             os.environ["EXPERIMENT_STRATEGY"] = strategy_name
 
@@ -364,11 +542,22 @@ elif page == "🤖 Agent View":
             st.session_state.active_run_id = run_id
             st.session_state.run_log = []
             st.session_state.extracted_products = []
+            st.session_state.browser_active = True
+            st.session_state.browser_error = None
 
             progress = st.progress(0, text="Starting execution...")
+
+            # Live browser status area
+            status_area = st.empty()
+            with status_area.container():
+                st.info(f"🌐 Starting browser... (mode: {browser_mode_display})")
+
             start_time = time.time()
             metrics = MetricsCollector()
             metrics.start()
+
+            # Create status callback for live updates
+            status_callback, status_data = make_status_callback()
 
             try:
                 from agent_framework.modules.browser_executor import BrowserExecutor
@@ -389,13 +578,22 @@ elif page == "🤖 Agent View":
                         state_mgr = StateManager()
                         state_mgr.set_goal(goal_text, len(plan.steps))
 
-                        async with BrowserExecutor(run_config) as browser:
+                        has_step_failures = False
+                        has_step_partial = False
+                        first_failure_reason = ""
+                        partial_reason = ""
+                        failed_step_num = 0
+                        partial_step_num = 0
+                        completed_steps = 0
+                        total_steps_count = len(plan.steps)
+                        run_config.reuse_browser = True
+
+                        async with BrowserExecutor(run_config, status_callback=status_callback, reuse_session=True) as browser:
                             prev_page = None
                             for i, (planned_step, action_obj) in enumerate(zip(plan.steps, actions_to_exec)):
-                                step_progress = (i + 1) / len(plan.steps)
-                                progress.progress(step_progress, text=f"Executing step {i+1}/{len(plan.steps)}: {planned_step.description or action_obj.action}")
+                                step_progress = (i + 1) / total_steps_count
 
-                                is_cp = planned_step.checkpoint or (i == len(plan.steps) - 1)
+                                is_cp = planned_step.checkpoint or (i == total_steps_count - 1)
                                 step_start = time.time()
 
                                 # Execute single action in browser (capture screenshot on every step for live visual view)
@@ -404,43 +602,63 @@ elif page == "🤖 Agent View":
                                     run_id=run_id,
                                     step_index=i,
                                     screenshot=True,
-                                )
+                                    )
                                 act_duration = (time.time() - step_start) * 1000
                                 p_actions += 1
-                                metrics.record_browser_action(action_obj.action, success=raw_state.get("action_success", True), duration_ms=act_duration)
+                                act_success = raw_state.get("action_success", True)
+                                act_err = raw_state.get("action_error")
+                                metrics.record_browser_action(action_obj.action, success=act_success, duration_ms=act_duration)
                                 metrics.record_screenshot()
 
+                                if not act_success:
+                                    has_step_failures = True
+                                    if not first_failure_reason:
+                                        first_failure_reason = act_err or "Action execution failed"
+                                        failed_step_num = i + 1
+
                                 page_state = observer.observe(raw_state, task_keywords=[plan.domain, plan.task_type], prev_state=prev_page)
-                                
+
                                 # Store active website details for live app view
                                 if page_state.url:
-                                    st.session_state.active_url = page_state.url
-                                    st.session_state.active_page_title = page_state.title
+                                    status_data["current_url"] = page_state.url
+                                    status_data["current_title"] = page_state.title
                                 if page_state.screenshot_path:
-                                    st.session_state.active_screenshot = page_state.screenshot_path
+                                    status_data["last_screenshot"] = page_state.screenshot_path
 
-                                # Capture any extracted items or direct links
+                                # Capture and update extracted items and their cart statuses in-place
                                 if page_state.extracted_items:
                                     for item in page_state.extracted_items:
-                                        if item not in st.session_state.extracted_products:
+                                        existing = next((p for p in st.session_state.extracted_products if p.get("url") and p.get("url") == item.get("url")), None)
+                                        if existing:
+                                            existing.update(item)
+                                        else:
                                             st.session_state.extracted_products.append(item)
 
                                 state_mgr.update(
                                     url=page_state.url,
                                     title=page_state.title,
                                     action=action_obj.action,
-                                    result="executed",
+                                    result="executed" if act_success else "failed",
                                     step_index=i,
                                 )
 
                                 # Verification at checkpoints
-                                ver_status = "success"
-                                ver_reason = "Executed in batch"
+                                if not act_success:
+                                    ver_status = "failure"
+                                    ver_reason = f"Step failed: {act_err or 'Element not found'}"
+                                else:
+                                    ver_status = "success"
+                                    ver_reason = "Executed in batch"
+                                    completed_steps += 1
+
                                 if is_cp:
                                     ver_result, ver_tok = await verifier.verify_checkpoint(
                                         expected_outcome=planned_step.description or "Action completed",
                                         page_state=page_state,
                                         previous_page_state=prev_page,
+                                        action_desc=f"{action_obj.action} {action_obj.selector or ''}",
+                                        action_success=act_success,
+                                        action_error=act_err,
                                     )
                                     ver_status = ver_result.status
                                     ver_reason = ver_result.reason
@@ -448,6 +666,16 @@ elif page == "🤖 Agent View":
                                     metrics.record_checkpoint()
                                     if ver_tok > 0:
                                         metrics.record_llm_call("fast", tokens=ver_tok, phase="verify")
+                                    if ver_status == "failure":
+                                        has_step_failures = True
+                                        if not first_failure_reason:
+                                            first_failure_reason = ver_reason
+                                            failed_step_num = i + 1
+                                    elif ver_status == "partial":
+                                        has_step_partial = True
+                                        if not partial_reason:
+                                            partial_reason = ver_reason
+                                            partial_step_num = i + 1
 
                                 # Log step
                                 await exp_logger.log_step(
@@ -473,10 +701,20 @@ elif page == "🤖 Agent View":
                                 prev_page = page_state
                                 state_mgr.mark_step_complete(i)
 
-                        return "success", p_actions, p_retries, p_tokens
+                        if has_step_failures:
+                            final_status = "partial" if completed_steps > 0 else "failed"
+                        elif has_step_partial:
+                            final_status = "partial"
+                            if not first_failure_reason:
+                                first_failure_reason = partial_reason
+                                failed_step_num = partial_step_num
+                        else:
+                            final_status = "success"
+
+                        return final_status, p_actions, p_retries, p_tokens, completed_steps, total_steps_count, first_failure_reason, failed_step_num
 
                     with st.spinner("⚡ Running batch browser execution..."):
-                        final_status, total_actions, total_retries, total_tokens = run_async(run_fast_pipeline())
+                        final_status, total_actions, total_retries, total_tokens, completed_steps, total_steps, failure_reason, failed_step = run_async(run_fast_pipeline())
 
                 else:
                     # ── LEGACY STEP-BY-STEP PATH ───────────────────────────
@@ -495,8 +733,25 @@ elif page == "🤖 Agent View":
                         action_history = []
                         step_idx = 0
                         prev_page_state = None
+                        has_failure = False
+                        first_err = ""
+                        failed_idx = 0
+                        completed_cnt = 0
 
-                        async with BrowserExecutor(run_config) as browser:
+                        # Smart initial URL inference from goal
+                        init_url = "https://www.google.com"
+                        goal_lower = goal_text.lower()
+                        if "youtube" in goal_lower:
+                            init_url = "https://www.youtube.com/"
+                        elif "amazon" in goal_lower:
+                            init_url = "https://www.amazon.in/"
+                        elif "flipkart" in goal_lower:
+                            init_url = "https://www.flipkart.com/"
+                        elif "makemytrip" in goal_lower:
+                            init_url = "https://www.makemytrip.com/"
+
+                        run_config.reuse_browser = True
+                        async with BrowserExecutor(run_config, status_callback=status_callback, reuse_session=True) as browser:
                             for task_idx, sub_task in enumerate(subtasks):
                                 retry_count = 0
                                 last_verification = None
@@ -510,7 +765,7 @@ elif page == "🤖 Agent View":
                                     raw_state = await browser.execute(
                                         ActionObject(
                                             action="navigate" if step_idx == 0 else "wait",
-                                            value="https://www.google.com" if step_idx == 0 else None,
+                                            value=init_url if step_idx == 0 else None,
                                         ),
                                         run_id=run_id,
                                         step_index=step_idx,
@@ -525,10 +780,13 @@ elif page == "🤖 Agent View":
 
                                     raw_state2 = await browser.execute(action_obj, run_id=run_id, step_index=step_idx)
                                     page_state_after = observer.observe(raw_state2)
-                                    
+
                                     if page_state_after.extracted_items:
                                         for item in page_state_after.extracted_items:
-                                            if item not in st.session_state.extracted_products:
+                                            existing = next((p for p in st.session_state.extracted_products if p.get("url") and p.get("url") == item.get("url")), None)
+                                            if existing:
+                                                existing.update(item)
+                                            else:
                                                 st.session_state.extracted_products.append(item)
 
                                     verification, ver_tokens = await verifier.verify(
@@ -563,69 +821,122 @@ elif page == "🤖 Agent View":
                                     step_idx += 1
 
                                     if verification.status == "success":
+                                        completed_cnt += 1
                                         break
 
-                                    if verification.status == "failure" and retry_count < run_config.max_retries_per_subtask:
-                                        repair_input = RepairInput(
-                                            original_goal=sub_task.goal,
-                                            failed_action=action_obj,
-                                            failure_reason=verification.reason,
-                                            current_page_state=page_state_after,
-                                            attempt_number=retry_count + 1,
-                                        )
-                                        amendment, rep_tokens = await repair_eng.repair(repair_input)
-                                        p_tokens += rep_tokens
-                                        p_retries += 1
-                                        await exp_logger.log_repair(
-                                            run_id, step_idx, verification.reason,
-                                            "prompt", amendment, "repaired"
-                                        )
-                                        if amendment.amendment_type == "sub_task_skip":
-                                            break
+                                    if verification.status == "failure":
+                                        has_failure = True
+                                        if not first_err:
+                                            first_err = verification.reason
+                                            failed_idx = task_idx + 1
+                                        if retry_count < run_config.max_retries_per_subtask:
+                                            repair_input = RepairInput(
+                                                original_goal=sub_task.goal,
+                                                failed_action=action_obj,
+                                                failure_reason=verification.reason,
+                                                current_page_state=page_state_after,
+                                                attempt_number=retry_count + 1,
+                                            )
+                                            amendment, rep_tokens = await repair_eng.repair(repair_input)
+                                            p_tokens += rep_tokens
+                                            p_retries += 1
+                                            await exp_logger.log_repair(
+                                                run_id, step_idx, verification.reason,
+                                                "prompt", amendment, "repaired"
+                                            )
+                                            if amendment.amendment_type == "sub_task_skip":
+                                                break
 
                                     retry_count += 1
 
-                            return "success", p_actions, p_retries, p_tokens
+                        c_status = "success" if not has_failure else ("partial" if completed_cnt > 0 else "failed")
+                        return c_status, p_actions, p_retries, p_tokens, completed_cnt, len(subtasks), first_err, failed_idx
 
                     with st.spinner("Agent running (Classic observe-think-act)..."):
-                        final_status, total_actions, total_retries, total_tokens = run_async(run_classic_pipeline())
+                        final_status, total_actions, total_retries, total_tokens, completed_steps, total_steps, failure_reason, failed_step = run_async(run_classic_pipeline())
+
+                # Sync status data back to session state
+                sync_status_to_session(status_data)
+                st.session_state.browser_active = False
 
                 metrics.stop()
                 elapsed = time.time() - start_time
                 st.session_state.last_metrics = metrics.to_dict()
 
+                # Store active URLs from status data
+                if status_data.get("current_url"):
+                    st.session_state.active_url = status_data["current_url"]
+                if status_data.get("current_title"):
+                    st.session_state.active_page_title = status_data["current_title"]
+                if status_data.get("last_screenshot"):
+                    st.session_state.active_screenshot = status_data["last_screenshot"]
+
                 run_async(exp_logger.end_run(
                     run_id, final_status, total_actions, total_retries,
                     total_tokens, elapsed
                 ))
-                progress.progress(1.0, text=f"✅ Task Completed in {elapsed:.1f}s!")
+
+                pct = max(0.0, min(1.0, completed_steps / max(total_steps, 1))) if total_steps > 0 else (1.0 if final_status == "success" else 0.0)
+                # Check for explicit completion percentage reported in failure/partial reason (e.g. "70% completed")
+                try:
+                    m_pct = re.search(r'(\d{1,3})%\s*completed', failure_reason or "")
+                    if m_pct:
+                        pct = float(m_pct.group(1)) / 100.0
+                except Exception:
+                    pass
+
+                display_pct = int(pct * 100)
+                if final_status == "success":
+                    progress.progress(1.0, text=f"✅ Task Completed 100% in {elapsed:.1f}s!")
+                    st.success(f"🎉 **Task 100% Completed in {elapsed:.1f}s!** All {total_steps} steps succeeded.")
+                elif final_status == "partial":
+                    progress.progress(pct, text=f"⚠️ Task Partially Completed ({display_pct}%) in {elapsed:.1f}s")
+                    st.warning(f"⚠️ **Task Partially Completed ({display_pct}%):** {failure_reason}")
+                else:
+                    progress.progress(pct, text=f"❌ Task Failed ({display_pct}%) in {elapsed:.1f}s")
+                    st.error(f"❌ **Task Failed at step {failed_step}:** {failure_reason}")
 
             except BrowserStartupError as bse:
+                sync_status_to_session(status_data)
+                st.session_state.browser_active = False
                 st.error(f"❌ **Browser Startup Failed:** {bse}")
                 diag = bse.diagnostics
                 with st.expander("🛠️ Browser Diagnostics & Troubleshooting", expanded=True):
-                    st.markdown(f"**Browser Type:** `{diag.get('browser_type', run_config.browser_type)}` | **Mode:** `{diag.get('browser_connection_mode', 'playwright')}` | **Headless:** `{diag.get('headless', run_config.headless)}`")
+                    st.markdown(f"**Browser Type:** `{diag.get('browser_type', run_config.browser_type)}` | **Mode:** `{diag.get('browser_mode', 'visible')}` | **Headless:** `{diag.get('headless', run_config.headless)}`")
                     st.markdown(f"**Playwright Available:** `{diag.get('playwright_available')}` (`{diag.get('playwright_version', 'N/A')}`)")
                     st.markdown(f"**Framework Location:** `{diag.get('agent_framework_path')}` (`{'Local src' if diag.get('is_local_src') else 'Installed site-packages'}`)")
                     if diag.get("attempted_launchers"):
                         st.markdown(f"**Attempted Launchers:** {', '.join(diag.get('attempted_launchers'))}")
                     if bse.suggested_fix:
                         st.info(f"💡 **Suggested Fix:** {bse.suggested_fix}")
+                    st.code("python -m playwright install chromium", language="bash")
                 run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
 
             except BrowserNotStartedError as bne:
+                sync_status_to_session(status_data)
+                st.session_state.browser_active = False
                 st.error(f"❌ **Browser Lifecycle Error:** {bne}")
                 st.info("💡 **Fix:** Ensure the browser is managed inside an `async with BrowserExecutor(config) as browser:` context.")
                 run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
 
             except BrowserBlockedError as bbe:
+                sync_status_to_session(status_data)
+                st.session_state.browser_active = False
                 st.error(f"🛑 **Navigation Blocked:** {bbe}")
                 st.warning("Action was blocked by safe browsing guardrails (e.g. checkout or payment URL).")
                 run_async(exp_logger.end_run(run_id, "blocked", 0, 0, 0, 0))
 
             except Exception as e:
+                sync_status_to_session(status_data)
+                st.session_state.browser_active = False
                 st.error(f"❌ **Agent Execution Error:** {e}")
                 run_async(exp_logger.end_run(run_id, "failed", 0, 0, 0, 0))
+
+        # ── Live Browser Status ──────────────────────────────────────────────
+        if st.session_state.get("browser_status_log"):
+            with st.expander("📡 Browser Status Log", expanded=False):
+                for msg in st.session_state.browser_status_log[-15:]:
+                    st.caption(msg)
 
         # Show Active Task Website & Live Visual Browser Window
         if st.session_state.get("active_url"):
@@ -634,9 +945,14 @@ elif page == "🤖 Agent View":
                 w_col1, w_col2 = st.columns([4, 1])
                 curr_title = st.session_state.get("active_page_title") or "Website Loaded"
                 w_col1.markdown(f"### 🔗 [{curr_title}]({st.session_state.active_url})")
-                w_col1.caption(f"**Direct Link:** `{st.session_state.active_url}`")
+
+                # Current URL & action display
+                w_col1.caption(f"**Current URL:** `{st.session_state.active_url}`")
+                if st.session_state.get("current_action"):
+                    w_col1.caption(f"**Current Action:** {st.session_state.current_action}")
+
                 w_col2.link_button("🚀 Open Website in Tab", st.session_state.active_url, width="stretch")
-                
+
                 active_img = st.session_state.get("active_screenshot")
                 if active_img and Path(active_img).exists():
                     st.image(active_img, caption=f"Active Browser Viewport — {curr_title}", width="stretch")
@@ -645,6 +961,18 @@ elif page == "🤖 Agent View":
         if st.session_state.get("extracted_products"):
             st.subheader("🛍️ Extracted Products & Direct Links")
             prods = st.session_state.extracted_products
+
+            # Show Cart Progress Header if multi-item cart task
+            cart_added = sum(1 for p in prods if p.get("cart_status") == "added")
+            cart_failed = sum(1 for p in prods if p.get("cart_status") in ("failed", "unavailable / out of stock"))
+            if cart_added + cart_failed > 0:
+                total_cart = cart_added + cart_failed
+                pct_cart = int((cart_added / total_cart) * 100)
+                if pct_cart == 100:
+                    st.success(f"🛒 **Multi-Item Cart Status:** All {total_cart} items successfully added to cart (100% completed)!")
+                else:
+                    st.warning(f"🛒 **Multi-Item Cart Status:** {cart_added} of {total_cart} items added to cart ({pct_cart}% completed).")
+
             for idx, prod in enumerate(prods, 1):
                 with st.container(border=True):
                     p1, p2, p3 = st.columns([5, 3, 2])
@@ -652,13 +980,29 @@ elif page == "🤖 Agent View":
                     price_info = f"💰 **{prod.get('price', 'N/A')}**"
                     if prod.get("rating"):
                         price_info += f" | ⭐ {prod.get('rating')}"
+
+                    c_status = prod.get("cart_status")
+                    if c_status == "added":
+                        price_info += " | 🛒 :green[**Added to Cart**]"
+                    elif c_status:
+                        price_info += f" | ⚠️ :orange[**{c_status}**]"
+
                     p2.markdown(price_info)
                     if prod.get("url"):
                         p3.link_button("🔗 Direct Product Link", prod["url"], width="stretch")
 
-        # Show Performance Scorecard if metrics are available
-        if st.session_state.last_metrics:
+        # ── Final Result Card ────────────────────────────────────────────────
+        if st.session_state.last_metrics and st.session_state.get("active_run_id"):
             m = st.session_state.last_metrics
+            st.subheader("✅ Task Completed")
+            with st.container(border=True):
+                rc1, rc2 = st.columns([3, 1])
+                rc1.markdown(f"**Website:** {st.session_state.get('active_page_title', 'N/A')}")
+                rc1.markdown(f"**Final URL:** `{st.session_state.get('active_url', 'N/A')}`")
+                if st.session_state.get("active_url"):
+                    rc2.link_button("🌐 Open Final Page", st.session_state.active_url, width="stretch")
+
+            # Performance Scorecard
             st.subheader("⚡ Performance Scorecard")
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.metric("⏱ Total Time", f"{m['total_time_sec']}s")

@@ -15,6 +15,7 @@ import re
 from ..config import AgentConfig, default_config
 from ..llm_client import LLMClient
 from ..models import GoalObject, SubTask
+from ..utils.json_extractor import extract_json_data
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +72,15 @@ class TaskDecomposer:
 
     def _parse_subtasks(self, text: str, goal: GoalObject) -> list[SubTask]:
         """Extract and validate sub-task JSON array from LLM response."""
-        json_match = re.search(r"\[[\s\S]*\]", text)
-        if not json_match:
+        raw = extract_json_data(text)
+        if isinstance(raw, dict) and "subtasks" in raw:
+            raw = raw["subtasks"]
+
+        if not raw or not isinstance(raw, list):
             logger.warning("[M2] No JSON array found, using fallback decomposition.")
             return self._fallback_subtasks(goal)
 
         try:
-            raw = json.loads(json_match.group())
             subtasks = [SubTask(**item) for item in raw]
 
             # Enforce ordering and limits
@@ -94,7 +97,7 @@ class TaskDecomposer:
                     )
                 )
             return subtasks
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
+        except (TypeError, ValueError) as e:
             logger.warning(f"[M2] Parse error: {e}. Using fallback.")
             return self._fallback_subtasks(goal)
 

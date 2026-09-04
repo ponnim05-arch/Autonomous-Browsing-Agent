@@ -15,6 +15,7 @@ import re
 from ..config import AgentConfig, default_config
 from ..llm_client import LLMClient
 from ..models import GoalObject
+from ..utils.json_extractor import extract_json_data
 
 logger = logging.getLogger(__name__)
 
@@ -104,16 +105,14 @@ class IntentParser:
 
     def _parse_response(self, text: str, fallback_goal: str) -> GoalObject:
         """Extract and validate JSON from LLM response."""
-        # Try to extract JSON block (handles markdown fences)
-        json_match = re.search(r"\{[\s\S]*\}", text)
-        if not json_match:
-            logger.warning("[M1] No JSON found in LLM response, using fallback.")
+        data = extract_json_data(text)
+        if not data or not isinstance(data, dict):
+            logger.warning("[M1] No valid JSON found in LLM response, using fallback.")
             return self._fallback_goal(fallback_goal)
 
         try:
-            data = json.loads(json_match.group())
             return GoalObject(**data)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
+        except (TypeError, ValueError) as e:
             logger.warning(f"[M1] JSON parse error: {e}. Using fallback.")
             return self._fallback_goal(fallback_goal)
 

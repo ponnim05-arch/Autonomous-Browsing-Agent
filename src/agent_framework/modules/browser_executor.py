@@ -22,10 +22,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 try:
     from playwright.async_api import async_playwright
@@ -88,17 +89,79 @@ class BrowserExecutor:
             results = await browser.execute_batch(actions, run_id, start_step)
     """
 
-    def __init__(self, config: AgentConfig = default_config):
+    # Class-level persistent session for reusing the same browser window across tasks
+    _shared_playwright: Any = None
+    _shared_browser: Any = None
+    _shared_context: Any = None
+    _shared_page: Any = None
+
+    def __init__(
+        self,
+        config: AgentConfig = default_config,
+        status_callback: Optional[Callable[[str, str, Optional[str]], None]] = None,
+        reuse_session: Optional[bool] = None,
+        **kwargs: Any,
+    ):
         self.config = config
+        self._status_callback = status_callback
+        if reuse_session is None and "reuse_session" in kwargs:
+            reuse_session = kwargs["reuse_session"]
+        self.reuse_session = (
+            reuse_session
+            if reuse_session is not None
+            else getattr(config, "reuse_browser", False)
+        )
         self._playwright = None
         self._browser = None
         self._context = None
         self._page = None
         self._is_started = False
         self._is_cdp = False
+        self._reused_shared_session = False
         # Selector cache: description → CSS selector
         self._selector_cache: dict[str, str] = {}
         self._last_extracted_items: list[dict[str, Any]] = []
+
+    # ── Status Callback ────────────────────────────────────────────────────────
+
+    def _emit_status(self, event: str, message: str, url: Optional[str] = None) -> None:
+        """Fire the status callback if one is registered."""
+        if self._status_callback:
+            try:
+                self._status_callback(event, message, url)
+            except Exception:
+                pass  # Never let callback errors disrupt execution
+        logger.info(f"[M5] Status: [{event}] {message}" + (f" ({url})" if url else ""))
+
+    # ── Properties ─────────────────────────────────────────────────────────────
+
+    @property
+    def is_alive(self) -> bool:
+        """Check if the full Playwright → Browser → Context → Page chain is healthy."""
+        if not self._is_started or not self._playwright or not self._browser:
+            return False
+        if not self._browser.is_connected():
+            return False
+        if not self._context:
+            return False
+        if not self._page or self._page.is_closed():
+            return False
+        return True
+
+    @property
+    def current_url(self) -> str:
+        """Return the current page URL, or empty string if unavailable."""
+        if self._page and not self._page.is_closed():
+            return self._page.url or ""
+        return ""
+
+    @property
+    def current_title(self) -> str:
+        """Return a cached title hint. For async title, use await page.title()."""
+        # Playwright title() is async; this provides a sync best-effort hint.
+        if self._page and not self._page.is_closed():
+            return getattr(self._page, '_last_title', '') or ''
+        return ""
 
     # ── Diagnostics ───────────────────────────────────────────────────────────
 
@@ -140,8 +203,10 @@ class BrowserExecutor:
             "playwright_version": pw_version,
             "playwright_module_path": pw_module_path,
             "browser_type": cfg.browser_type,
+            "browser_mode": getattr(cfg, "browser_mode", "visible"),
             "browser_connection_mode": getattr(cfg, "browser_connection_mode", "playwright"),
             "headless": cfg.headless,
+            "keep_browser_open": getattr(cfg, "keep_browser_open", False),
             "cdp_endpoint": getattr(cfg, "cdp_endpoint", "http://127.0.0.1:9222"),
         }
 
@@ -179,6 +244,45 @@ class BrowserExecutor:
             getattr(self.config, "browser_connection_mode", "playwright") or "playwright"
         ).lower()
 
+        browser_mode = getattr(self.config, "browser_mode", "visible")
+
+        # ── Reuse shared session if active and healthy ─────────────────────
+        if self.reuse_session and BrowserExecutor._shared_browser:
+            shared_b = BrowserExecutor._shared_browser
+            shared_ctx = BrowserExecutor._shared_context
+            try:
+                if shared_b.is_connected() and shared_ctx:
+                    self._playwright = BrowserExecutor._shared_playwright
+                    self._browser = shared_b
+                    self._context = shared_ctx
+
+                    # Ensure we have an active, open page
+                    page = BrowserExecutor._shared_page
+                    if not page or page.is_closed():
+                        pages = self._context.pages
+                        if pages and not pages[-1].is_closed():
+                            page = pages[-1]
+                        else:
+                            page = await self._context.new_page()
+
+                    self._page = page
+                    BrowserExecutor._shared_page = page
+                    try:
+                        await self._page.bring_to_front()
+                    except Exception:
+                        pass
+
+                    self._is_started = True
+                    self._reused_shared_session = True
+                    self._emit_status("browser_started", f"✅ Reused existing browser window (mode={browser_mode})")
+                    logger.info("[M5] Successfully attached to existing browser window session.")
+                    return
+            except Exception as e:
+                logger.warning(f"[M5] Could not attach to shared browser: {e}. Launching fresh instance...")
+                await BrowserExecutor.close_shared_session()
+
+        self._emit_status("browser_starting", f"🌐 Starting browser (mode={browser_mode}, type={self.config.browser_type})...")
+
         try:
             self._playwright = await async_playwright().start()
 
@@ -187,14 +291,23 @@ class BrowserExecutor:
             else:
                 await self._start_playwright()
 
+            if self.reuse_session:
+                BrowserExecutor._shared_playwright = self._playwright
+                BrowserExecutor._shared_browser = self._browser
+                BrowserExecutor._shared_context = self._context
+                BrowserExecutor._shared_page = self._page
+
             self._is_started = True
+            self._emit_status("browser_started", f"✅ Browser started (mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})")
             logger.info(
-                f"[M5] BrowserExecutor ready (mode={connection_mode}, type={self.config.browser_type}, headless={self.config.headless})"
+                f"[M5] BrowserExecutor ready (mode={connection_mode}, browser_mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})"
             )
         except BrowserStartupError:
+            self._emit_status("browser_error", "❌ Browser startup failed")
             await self.stop()
             raise
         except Exception as exc:
+            self._emit_status("browser_error", f"❌ Could not start browser: {exc}")
             await self.stop()
             diag = self.get_diagnostics(self.config)
             diag["startup_error"] = str(exc)
@@ -240,25 +353,69 @@ class BrowserExecutor:
     async def _start_playwright(self) -> None:
         """Launch a dedicated Playwright browser instance with cascading fallbacks."""
         b_type = (self.config.browser_type or "chromium").lower()
+        browser_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-features=CalculateNativeWinOcclusion",
+            "--disable-ipc-flooding-protection",
+        ]
+        # In visible mode, start maximized for better UX
+        if not self.config.headless:
+            browser_args.append("--start-maximized")
+
         launch_kwargs = {
             "headless": self.config.headless,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--disable-background-timer-throttling",
-                "--disable-backgrounding-occluded-windows",
-                "--disable-renderer-backgrounding",
-                "--disable-features=CalculateNativeWinOcclusion",
-                "--disable-ipc-flooding-protection",
-            ],
+            "args": browser_args,
         }
 
         self._is_cdp = False
         self._browser = await self._launch_browser_resiliently(b_type, launch_kwargs)
-        self._context = await self._browser.new_context(
-            user_agent=_USER_AGENT,
-            viewport={"width": 1366, "height": 768},
-            locale="en-IN",
-        )
+
+        # For visible mode with --start-maximized, use no_viewport so the
+        # page fills the maximized window instead of being constrained.
+        ctx_kwargs = {
+            "user_agent": _USER_AGENT,
+            "locale": "en-IN",
+        }
+        if not self.config.headless:
+            ctx_kwargs["no_viewport"] = True
+        else:
+            ctx_kwargs["viewport"] = {"width": 1366, "height": 768}
+
+        self._context = await self._browser.new_context(**ctx_kwargs)
+
+        # Force links to open in the same window/tab instead of opening separate windows
+        try:
+            await self._context.add_init_script("""
+                // Prevent target="_blank" from opening new windows/tabs
+                document.addEventListener('DOMContentLoaded', () => {
+                    document.querySelectorAll('a[target="_blank"]').forEach(a => a.removeAttribute('target'));
+                });
+                document.addEventListener('click', (e) => {
+                    const a = e.target && e.target.closest ? e.target.closest('a') : null;
+                    if (a && a.getAttribute('target') === '_blank') {
+                        a.removeAttribute('target');
+                    }
+                }, true);
+            """)
+        except Exception as e:
+            logger.debug(f"[M5] Could not add link init script: {e}")
+
+        # Auto-track and focus any new tabs that are opened
+        def _handle_new_tab(new_p):
+            logger.info(f"[M5] New tab opened: {new_p.url}. Keeping active page updated.")
+            self._page = new_p
+            BrowserExecutor._shared_page = new_p
+
+        try:
+            res = self._context.on("page", _handle_new_tab)
+            if inspect.isawaitable(res):
+                await res
+        except Exception:
+            pass
+
         self._page = await self._context.new_page()
 
     async def _launch_browser_resiliently(self, b_type: str, launch_kwargs: dict):
@@ -340,8 +497,41 @@ class BrowserExecutor:
             suggested_fix="Install missing browser binaries using: python -m playwright install chromium",
         )
 
-    async def stop(self) -> None:
-        """Close browser, context, page, and Playwright cleanly without leaving dangling processes."""
+    async def stop(self, force_close: bool = False) -> None:
+        """Close browser, context, page, and Playwright cleanly without leaving dangling processes.
+
+        If reuse_session is True and not force_close, the browser window stays open
+        for subsequent tasks to execute in the same window.
+        """
+        keep_open = getattr(self.config, "keep_browser_open", False)
+
+        if self.reuse_session and not force_close:
+            logger.info("[M5] reuse_session=True — browser window kept alive for subsequent tasks.")
+            self._emit_status("browser_kept_open", "🌐 Browser window kept open for subsequent tasks")
+            self._is_started = False
+            self._selector_cache.clear()
+            return
+
+        if not self.reuse_session and keep_open and self._browser and not self._is_cdp:
+            # Leave the browser window open — only release Python handles
+            logger.info("[M5] keep_browser_open=True — browser window stays open.")
+            self._emit_status("browser_kept_open", "🌐 Browser window left open for review")
+            self._page = None
+            self._context = None
+            self._browser = None
+            try:
+                if self._playwright:
+                    await self._playwright.stop()
+            except Exception as e:
+                logger.debug(f"[M5] Error stopping playwright: {e}")
+            finally:
+                self._playwright = None
+                self._is_started = False
+                self._selector_cache.clear()
+            return
+
+        self._emit_status("browser_stopping", "🔄 Closing browser...")
+
         try:
             if self._page:
                 if not self._page.is_closed():
@@ -381,7 +571,50 @@ class BrowserExecutor:
             self._is_started = False
             self._selector_cache.clear()
 
+        # If this instance was using the shared session, clear the shared pointers
+        if self.reuse_session or force_close:
+            BrowserExecutor._shared_page = None
+            BrowserExecutor._shared_context = None
+            BrowserExecutor._shared_browser = None
+            BrowserExecutor._shared_playwright = None
+
+        self._emit_status("browser_stopped", "✅ Browser closed")
         logger.info("[M5] Browser stopped and resources released.")
+
+    @classmethod
+    async def close_shared_session(cls) -> None:
+        """Explicitly shut down any persistent shared browser window."""
+        try:
+            if cls._shared_page and not cls._shared_page.is_closed():
+                await cls._shared_page.close()
+        except Exception:
+            pass
+        finally:
+            cls._shared_page = None
+
+        try:
+            if cls._shared_context:
+                await cls._shared_context.close()
+        except Exception:
+            pass
+        finally:
+            cls._shared_context = None
+
+        try:
+            if cls._shared_browser and cls._shared_browser.is_connected():
+                await cls._shared_browser.close()
+        except Exception:
+            pass
+        finally:
+            cls._shared_browser = None
+
+        try:
+            if cls._shared_playwright:
+                await cls._shared_playwright.stop()
+        except Exception:
+            pass
+        finally:
+            cls._shared_playwright = None
 
     # ── Health Check & Recovery ───────────────────────────────────────────────
 
@@ -416,11 +649,18 @@ class BrowserExecutor:
             valid_pages = [p for p in self._context.pages if not p.is_closed()]
             if valid_pages:
                 self._page = valid_pages[-1]
+                BrowserExecutor._shared_page = self._page
+                try:
+                    await self._page.bring_to_front()
+                except Exception:
+                    pass
             else:
                 self._page = await self._context.new_page()
+                BrowserExecutor._shared_page = self._page
         elif not self._page or self._page.is_closed():
             logger.warning("[M5] Browser page was closed or missing. Creating a new page to recover session...")
             self._page = await self._context.new_page()
+            BrowserExecutor._shared_page = self._page
 
     # ── Single Action Execution ───────────────────────────────────────────────
 
@@ -457,6 +697,21 @@ class BrowserExecutor:
         success = True
         error_msg = None
 
+        # Emit status before action execution
+        act_desc = action.action
+        if action.action == "navigate":
+            self._emit_status("navigating", f"🔗 Navigating to {action.value}", action.value)
+        elif action.action in ("type", "fill"):
+            self._emit_status("action", f"⌨️ Typing into {action.selector or 'input'}...")
+        elif action.action == "click":
+            self._emit_status("action", f"🖱️ Clicking {action.selector or 'element'}...")
+        elif action.action == "extract":
+            self._emit_status("action", f"🔍 Extracting data...")
+        elif action.action == "scroll":
+            self._emit_status("action", f"📜 Scrolling page...")
+        else:
+            self._emit_status("action", f"🤖 Executing: {act_desc}")
+
         try:
             await self._dispatch(action, timeout)
             # Smart wait: wait for DOM ready instead of fixed sleep
@@ -476,6 +731,12 @@ class BrowserExecutor:
         raw_state["action_success"] = success
         if error_msg:
             raw_state["action_error"] = error_msg
+
+        # Emit post-action status with current page info
+        if success:
+            self._emit_status("page_loaded", f"📄 {raw_state.get('title', 'Page')}", raw_state.get("url"))
+        else:
+            self._emit_status("action_failed", f"⚠️ Action failed: {error_msg}")
         return raw_state
 
     # ── Batch Execution (Plan-then-Execute) ────────────────────────────────────
@@ -530,6 +791,48 @@ class BrowserExecutor:
 
         return results
 
+    async def _click_resiliently(self, el: Any, timeout: int = 4000, force: bool = False) -> None:
+        """
+        Robustly click an element using a 4-tier fallback:
+        Tier 1: Scroll into view so button is positioned in the viewport
+        Tier 2: Standard Playwright click (simulates genuine user interaction)
+        Tier 3: Forced Playwright click (force=True, bypasses actionability & occlusion checks)
+        Tier 4: JavaScript DOM click (el.evaluate("e => e.click()")) - 100% reliable for small buttons,
+                elements with inner spans/SVGs, and transparent wrappers.
+        """
+        # Tier 1: Scroll into view
+        try:
+            await el.scroll_into_view_if_needed(timeout=1500)
+        except Exception:
+            pass
+
+        # Tier 2: Standard click
+        if not force:
+            try:
+                await el.click(timeout=min(timeout, 3000))
+                return
+            except Exception as e1:
+                logger.debug(f"[M5] Standard click intercepted or timed out ({e1}). Retrying with force click...")
+
+        # Tier 3: Force click
+        try:
+            await el.click(force=True, timeout=2000)
+            return
+        except Exception as e2:
+            logger.debug(f"[M5] Force click failed ({e2}). Falling back to native DOM click...")
+
+        # Tier 4: Direct DOM JavaScript click dispatch
+        try:
+            await el.evaluate("""e => {
+                const target = e.closest('button, a, input[type="submit"], input[type="button"], [role="button"]') || e;
+                target.scrollIntoView({ block: 'center', inline: 'center' });
+                target.click();
+            }""")
+            return
+        except Exception as e3:
+            logger.warning(f"[M5] Native DOM click failed: {e3}")
+            raise e3
+
     # ── Action Dispatch ───────────────────────────────────────────────────────
 
     async def _dispatch(self, action: ActionObject, timeout: int) -> None:
@@ -538,11 +841,89 @@ class BrowserExecutor:
         act = (action.action or "").lower().strip()
         sel_lower = (action.selector or "").lower().strip()
 
+        # Multi-item cart execution
+        if act in ("add_all_to_cart", "add_multiple_to_cart") or (
+            act == "click" and any(k in sel_lower for k in ("add_all_to_cart", "add_them_to_cart", "add all to cart", "add_all", "add them to cart", "add all"))
+        ):
+            await self._add_all_to_cart(action, timeout)
+            return
+
         if act == "click":
+            is_volume = any(k in sel_lower for k in ("volume", "sound", "unmute", "max_volume", "volume_max"))
+            is_play = any(k in sel_lower for k in ("play", "video_player", "play_button"))
+
+            # Volume & Sound handling: directly maximize volume via HTML5 video element
+            if is_volume:
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const v = document.querySelector('video');
+                            if (v) {
+                                v.muted = false;
+                                v.volume = 1.0;
+                            }
+                        }
+                    """)
+                except Exception:
+                    pass
+
+            # Video play handling: play HTML5 video element
+            if is_play:
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const v = document.querySelector('video');
+                            if (v && v.paused) {
+                                v.play();
+                            }
+                        }
+                    """)
+                except Exception:
+                    pass
+
+            # Smart check: If item is ALREADY added to cart and we are on cart confirmation/wagon page
+            curr_url = (page.url or "").lower()
+            try:
+                curr_title = (await page.title() or "").lower()
+            except Exception:
+                curr_title = ""
+
+            is_cart_page = any(k in curr_url for k in ("/cart", "/smart-wagon", "/gp/cart", "/viewcart")) or any(k in curr_title for k in ("shopping cart", "cart", "added to cart"))
+
+            if is_cart_page and any(k in sel_lower for k in ("add_to_cart", "add to cart", "add_cart", "addtocart")):
+                logger.info(f"[M5] Product is already added to cart on {curr_url} ('{curr_title}'). Step fulfilled.")
+                return
+
             el = await self._resolve_element(action.selector, timeout)
             if el:
-                await el.click(timeout=timeout)
+                try:
+                    await self._click_resiliently(el, timeout=timeout, force=(is_volume or is_play))
+                except Exception as click_err:
+                    if is_volume or is_play:
+                        logger.info(f"[M5] Click on {action.selector} bypassed due to overlay ({click_err}), action fulfilled via video JS")
+                        return
+                    raise click_err
+
+                # If we clicked a video or play button, ensure playback started
+                if any(k in sel_lower for k in ("video", "play")):
+                    try:
+                        await page.evaluate("() => { const v = document.querySelector('video'); if (v && v.paused) v.play(); }")
+                    except Exception:
+                        pass
+                return
             else:
+                # If on cart page and asking for cart_button, but cart button was not resolved as element
+                if is_cart_page and any(k in sel_lower for k in ("cart_button", "view_cart", "cart", "open_cart", "go_to_cart")):
+                    logger.info(f"[M5] Already on cart page ({curr_url}). Cart view fulfilled.")
+                    return
+                # If volume action, we already set volume in JS, so consider it accomplished
+                if is_volume:
+                    logger.info("[M5] Volume/sound set directly via HTML5 video element")
+                    return
+                # If play button, we already attempted play in JS
+                if is_play:
+                    logger.info("[M5] Video play triggered directly via HTML5 video element")
+                    return
                 # Fallback specifically for search submit buttons if not found
                 if any(k in sel_lower for k in ("search_button", "search_btn", "search submit", "submit search", "search-button")):
                     try:
@@ -577,17 +958,33 @@ class BrowserExecutor:
             if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("about:"):
                 url = "https://" + url
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=self.config.page_load_timeout_ms)
+                await page.goto(url, wait_until="domcontentloaded", timeout=min(self.config.page_load_timeout_ms, 20000))
             except Exception as goto_err:
                 logger.warning(f"[M5] Fast goto with domcontentloaded failed: {goto_err}. Retrying standard goto...")
-                await page.goto(url, timeout=self.config.page_load_timeout_ms)
+                try:
+                    await page.goto(url, timeout=self.config.page_load_timeout_ms)
+                except Exception as e2:
+                    curr = page.url or ""
+                    target_host = url.split("://")[-1].split("/")[0].replace("www.", "")
+                    if target_host and target_host in curr:
+                        logger.info(f"[M5] Target host '{target_host}' reached despite timeout warning.")
+                    else:
+                        raise e2
 
         elif act == "scroll":
             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
 
         elif act == "extract":
             # Live in-page structured product and link extraction
-            extracted = await self._extract_page_products_or_items(action.selector, action.value)
+            limit = 20
+            if action.value:
+                try:
+                    limit_match = re.search(r'\b(\d{1,2})\b', str(action.value))
+                    if limit_match:
+                        limit = int(limit_match.group(1))
+                except Exception:
+                    limit = 20
+            extracted = await self._extract_page_products_or_items(action.selector, action.value, limit=limit)
             self._last_extracted_items = extracted
             action.value = str(extracted)
 
@@ -618,7 +1015,24 @@ class BrowserExecutor:
 
         elif act == "press":
             key = (action.value or "Enter").strip()
-            await page.keyboard.press(key)
+            if any(k in key.lower() for k in ("volumemax", "volumeup", "volume_up", "sound", "max")):
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const v = document.querySelector('video');
+                            if (v) {
+                                v.muted = false;
+                                v.volume = 1.0;
+                            }
+                        }
+                    """)
+                except Exception:
+                    pass
+            else:
+                try:
+                    await page.keyboard.press(key)
+                except Exception as e:
+                    logger.warning(f"[M5] Keyboard press '{key}' failed: {e}")
 
         elif act == "dismiss_popup":
             await self._dismiss_popups()
@@ -656,6 +1070,11 @@ class BrowserExecutor:
                     if latest != self._page and not latest.is_closed():
                         logger.info(f"[M5] New tab opened after click: '{latest.url}'. Switching active page.")
                         self._page = latest
+                        BrowserExecutor._shared_page = latest
+                        try:
+                            await latest.bring_to_front()
+                        except Exception:
+                            pass
                 # After clicking products/cart/buy, wait for new page to settle
                 try:
                     await self._page.wait_for_load_state(
@@ -715,6 +1134,13 @@ class BrowserExecutor:
             # Flipkart-specific
             "button._2KpZ6l._2doB4z",
             "button:has-text('✕'):near(.login)",
+            # YouTube-specific ad dismiss
+            "button.ytp-ad-skip-button",
+            "button.ytp-ad-skip-button-modern",
+            ".ytp-ad-skip-button-container button",
+            "button:has-text('Skip Ads')",
+            "button:has-text('Skip Ad')",
+            "button:has-text('Skip')",
         ]
 
         for sel in popup_selectors:
@@ -789,6 +1215,9 @@ class BrowserExecutor:
             search_input_selectors = [
                 "#twotabsearchtextbox",
                 "input[name='field-keywords']",
+                "input[name='search_query']",
+                "input#search",
+                "ytd-searchbox input",
                 "input[name='q']",
                 "input[type='search']",
                 "input[placeholder*='search' i]",
@@ -825,52 +1254,149 @@ class BrowserExecutor:
                 except Exception:
                     continue
 
-        # 5. Semantic mapping for Add to Cart / Cart Button
-        if any(k in sel_lower for k in ("add_to_cart", "add to cart", "cart_button", "add_cart", "addtocart")):
+        # 5. Semantic mapping for Add to Cart
+        if any(k in sel_lower for k in ("add_to_cart", "add to cart", "add_cart", "addtocart", "add_to_bag", "add to bag", "add_to_basket")):
             cart_selectors = [
+                # Amazon Desktop & Mobile (visible buybox first)
+                "#desktop_qualifiedBuyBox #add-to-cart-button",
+                "#buybox #add-to-cart-button",
+                "#desktop_qualifiedBuyBox input[name='submit.add-to-cart']",
                 "#add-to-cart-button",
                 "input#add-to-cart-button",
+                "span.a-button:has(#add-to-cart-button)",
+                "span.a-button-primary:has(#add-to-cart-button)",
                 "#add-to-cart-button-ubb",
-                "button:has-text('Add to Cart')",
-                "button:has-text('Add to cart')",
-                "input[value*='Add to Cart' i]",
-                "button:has-text('ADD TO CART')",
+                "input[name='submit.add-to-cart']",
+                "#exportsUndeliverable-cart-announce",
+                "#bundle-add-to-cart-button",
+                "#addToCart",
+                "span[id*='submit.add-to-cart'] input",
+                "button[name='submit.addToCart']",
+                "input[name='submit.addToCart']",
                 "[data-action='add-to-cart']",
+                # Flipkart Modern & Classic
+                "button:has-text('Add to Cart')",
+                "button:has-text('ADD TO CART')",
+                "button:has-text('Add to cart')",
+                "button._2KpZ6l._2U9uOA._3v1-ww",
+                "button.QqFHMw",
+                "button[class*='QqFHMw']",
+                "li button:has-text('Add to Cart')",
+                "ul.row li button",
+                # Generic E-Commerce
+                "button:has-text('Add to Bag')",
+                "button:has-text('ADD TO BAG')",
+                "button:has-text('Add to Basket')",
+                "button[name*='add-to-cart' i]",
+                "[data-testid*='add-to-cart' i]",
                 "button.add-to-cart",
                 ".add-to-cart-button",
-                "button:has-text('Add to Basket')",
-                # Flipkart
-                "button:has-text('Add to Cart')",
-                "button._2KpZ6l",
-                "button.QqFHMw",
+                "input[value*='Add to Cart' i]",
+                "a:has-text('Add to Cart')",
             ]
+            # Prioritize the first visible button to avoid hidden trade-in/secondary forms
             for s in cart_selectors:
                 try:
+                    loc = page.locator(s)
+                    cnt = await loc.count()
+                    for idx in range(cnt):
+                        cand = loc.nth(idx)
+                        if await cand.is_visible():
+                            self._selector_cache[selector] = s
+                            return cand
+                except Exception:
+                    continue
+            # Fallback to direct locator if none visible yet
+            try:
+                el = page.locator(", ".join(cart_selectors)).first
+                await el.wait_for(state="attached", timeout=min(timeout, 2000))
+                return el
+            except Exception:
+                pass
+
+        # 6. Semantic mapping for Cart Button / View Cart / Go to Cart
+        if any(k in sel_lower for k in ("cart_button", "view_cart", "go_to_cart", "open_cart", "my_cart", "shopping_cart", "view cart", "cart")):
+            view_cart_selectors = [
+                # Amazon Cart Navigation & Smart Wagon
+                "#nav-cart",
+                "#nav-cart-count-container",
+                "#sw-gtc a",
+                ".sw-gtc a",
+                "a:has-text('Go to Cart')",
+                "a:has-text('View Cart')",
+                "#attach-sidesheet-view-cart-button",
+                "#attach-sidesheet-view-cart-button a",
+                "a[href*='/cart']",
+                "a[href*='/gp/cart']",
+                # Flipkart Cart Navigation
+                "a[href*='/viewcart']",
+                "a:has-text('Cart')",
+                "a._3SkBxJ",
+                # Generic Cart Links
+                "a[href*='cart' i]",
+                "button[aria-label*='cart' i]",
+                "a[aria-label*='cart' i]",
+                "button:has-text('Cart')",
+                "a:has-text('Bag')",
+                "a:has-text('Basket')",
+            ]
+            combined = ", ".join(view_cart_selectors)
+            try:
+                el = page.locator(combined).first
+                await el.wait_for(state="attached", timeout=min(timeout, 2500))
+                self._selector_cache[selector] = combined
+                return el
+            except Exception:
+                pass
+            for s in view_cart_selectors:
+                try:
                     el = page.locator(s).first
-                    await el.wait_for(state="visible", timeout=min(timeout, 3000))
-                    self._selector_cache[selector] = s
-                    return el
+                    if await el.is_visible(timeout=200):
+                        self._selector_cache[selector] = s
+                        return el
                 except Exception:
                     continue
 
-        # 6. Semantic mapping for Buy Now
-        if any(k in sel_lower for k in ("buy_now", "buy now", "buy_button", "buynow")):
+        # 7. Semantic mapping for Buy Now
+        if any(k in sel_lower for k in ("buy_now", "buy now", "buy_button", "buynow", "buy")):
             buy_selectors = [
+                # Amazon
                 "#buy-now-button",
                 "input#buy-now-button",
+                "span.a-button:has(#buy-now-button)",
+                "span.a-button-oneclick:has(#buy-now-button)",
+                "input[name='submit.buy-now']",
+                "#buyNow_feature_div input",
+                "span[id*='submit.buy-now'] input",
+                "[data-action='buy-now']",
+                "input[value*='Buy Now' i]",
+                # Flipkart
                 "button:has-text('Buy Now')",
                 "button:has-text('BUY NOW')",
-                "input[value*='Buy Now' i]",
-                ".buy-now-button",
                 "button._2KpZ6l._1FqOHf",
+                "button.QqFHMw._2qbW8n",
+                "li button:has-text('Buy Now')",
+                # Generic
                 "button:has-text('Buy Now')",
+                "button[name*='buy-now' i]",
+                "[data-testid*='buy-now' i]",
+                ".buy-now-button",
+                "a:has-text('Buy Now')",
             ]
+            combined = ", ".join(buy_selectors)
+            try:
+                el = page.locator(combined).first
+                await el.wait_for(state="attached", timeout=min(timeout, 2500))
+                self._selector_cache[selector] = combined
+                return el
+            except Exception:
+                pass
             for s in buy_selectors:
                 try:
                     el = page.locator(s).first
-                    await el.wait_for(state="visible", timeout=min(timeout, 3000))
-                    self._selector_cache[selector] = s
-                    return el
+                    if await el.is_visible(timeout=200):
+                        self._selector_cache[selector] = s
+                        return el
                 except Exception:
                     continue
 
@@ -1007,7 +1533,67 @@ class BrowserExecutor:
             # No popup found — not an error
             return None
 
-        # 5. Try as direct CSS selector
+        # 13. Semantic mapping for Videos / YouTube
+        if any(k in sel_lower for k in ("first_video", "video_link", "video_title", "first video", "video_item", "video")):
+            video_selectors = [
+                "ytd-video-renderer a#video-title",
+                "ytd-video-renderer #video-title",
+                "a#video-title",
+                "ytd-video-renderer a#thumbnail",
+                "#contents ytd-video-renderer a#thumbnail",
+                "ytd-rich-item-renderer a#video-title",
+                "a[href*='/watch']",
+                "video",
+            ]
+            for s in video_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 3000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 14. Semantic mapping for Video Play / Pause Button
+        if any(k in sel_lower for k in ("play_button", "play button", "play_video", "pause_button", "video_player")):
+            play_selectors = [
+                "button.ytp-play-button",
+                ".ytp-play-button",
+                "button[aria-label*='Play' i]",
+                "button[aria-label*='Pause' i]",
+                ".video-stream",
+                "video",
+            ]
+            for s in play_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2500))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 15. Semantic mapping for Volume / Sound / Unmute
+        if any(k in sel_lower for k in ("volume_max", "volume", "sound", "unmute", "volume_button", "mute_button", "max_volume")):
+            volume_selectors = [
+                "button.ytp-mute-button",
+                ".ytp-mute-button",
+                ".ytp-volume-panel",
+                "button[aria-label*='Mute' i]",
+                "button[aria-label*='volume' i]",
+                "button[aria-label*='Unmute' i]",
+                "video",
+            ]
+            for s in volume_selectors:
+                try:
+                    el = page.locator(s).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 2000))
+                    self._selector_cache[selector] = s
+                    return el
+                except Exception:
+                    continue
+
+        # 16. Try as direct CSS selector
         try:
             el = page.locator(selector).first
             await el.wait_for(state="visible", timeout=min(timeout, 2000))
@@ -1070,7 +1656,7 @@ class BrowserExecutor:
     # ── In-Page Product & Direct Link Extraction ──────────────────────────────
 
     async def _extract_page_products_or_items(
-        self, selector: str | None = None, value: str | None = None
+        self, selector: str | None = None, value: str | None = None, limit: int = 20
     ) -> list[dict[str, Any]]:
         """
         Extract structured items, titles, prices, ratings, and direct links from the page.
@@ -1079,9 +1665,10 @@ class BrowserExecutor:
             return []
 
         js_extractor = """
-        () => {
+        (maxCount) => {
             const results = [];
             const seenUrls = new Set();
+            const cap = maxCount || 20;
 
             // 1. Amazon selectors
             const amazonItems = document.querySelectorAll('div[data-component-type="s-search-result"], div.s-result-item[data-asin]');
@@ -1196,12 +1783,12 @@ class BrowserExecutor:
                 });
             }
 
-            return results.slice(0, 15);
+            return results.slice(0, cap);
         }
         """
 
         try:
-            items = await self._page.evaluate(js_extractor) or []
+            items = await self._page.evaluate(js_extractor, limit) or []
             # If user asked for cheapest product, sort by price_num ascending
             sel_query = f"{selector or ''} {value or ''}".lower()
             if any(k in sel_query for k in ("cheap", "lowest", "least", "min")):
@@ -1210,11 +1797,250 @@ class BrowserExecutor:
                 valid_priced.sort(key=lambda x: x["price_num"])
                 items = valid_priced + unpriced
 
-            logger.info(f"[M5] Extracted {len(items)} items from page '{self._page.url}'")
+            logger.info(f"[M5] Extracted {len(items)} items from page '{self._page.url}' (requested limit={limit})")
             return items
         except Exception as exc:
             logger.warning(f"[M5] In-page extraction failed: {exc}")
             return []
+
+    # ── Multi-Item Cart Execution ─────────────────────────────────────────────
+
+    async def _add_all_to_cart(self, action: ActionObject, timeout: int) -> None:
+        """
+        Sequentially visit each extracted product in the SAME browser tab,
+        click Add to Cart, record real-time status per item, and navigate
+        to the cart page at the end.
+        """
+        page = self._page
+        if not page or page.is_closed():
+            raise RuntimeError("Browser page not available for add_all_to_cart")
+
+        # Parse target item count
+        target_count = 10
+        raw_val = str(action.value or "")
+        count_match = re.search(r'\b(\d{1,2})\b', raw_val)
+        if count_match:
+            try:
+                target_count = int(count_match.group(1))
+            except Exception:
+                pass
+        target_count = max(1, min(target_count, 25))
+
+        # Retrieve candidate items
+        items = [dict(it) for it in self._last_extracted_items if it.get("url")]
+        if len(items) < target_count:
+            # Try in-page extraction to fill up to target_count
+            extracted = await self._extract_page_products_or_items(limit=target_count)
+            seen_urls = {it.get("url") for it in items}
+            for it in extracted:
+                if it.get("url") and it.get("url") not in seen_urls:
+                    items.append(dict(it))
+                    seen_urls.add(it.get("url"))
+
+        # Fallback: if items list is still empty, scrape any product links on the current search page
+        if not items:
+            raw_links = await page.evaluate("""
+                () => {
+                    const links = [];
+                    const seen = new Set();
+                    document.querySelectorAll('a[href*="/dp/"], a[href*="/p/"]').forEach(a => {
+                        let h = a.getAttribute('href') || '';
+                        if (h.startsWith('/')) h = window.location.origin + h;
+                        const t = a.textContent.trim();
+                        if (h.startsWith('http') && !seen.has(h) && t.length > 5) {
+                            seen.add(h);
+                            links.push({ title: t, price: 'N/A', price_num: 0, url: h, rating: '' });
+                        }
+                    });
+                    return links.slice(0, 25);
+                }
+            """)
+            if raw_links:
+                items = raw_links
+
+        target_items = items[:target_count]
+        actual_total = len(target_items)
+        if actual_total == 0:
+            raise RuntimeError("No product links found on the page to add to cart.")
+
+        logger.info(f"[M5] Beginning multi-item cart flow for {actual_total} items (target={target_count})")
+        self._emit_status("action", f"🛒 Beginning multi-item cart flow for {actual_total} products...")
+
+        add_cart_selectors = [
+            "#desktop_qualifiedBuyBox #add-to-cart-button",
+            "#buybox #add-to-cart-button",
+            "#desktop_qualifiedBuyBox input[name='submit.add-to-cart']",
+            "#add-to-cart-button",
+            "input#add-to-cart-button",
+            "#add-to-cart-button-ubb",
+            "button#add-to-cart-button",
+            "[name='submit.add-to-cart']",
+            "button:has-text('Add to Cart')",
+            "button:has-text('Add to cart')",
+            "button:has-text('ADD TO CART')",
+            "a:has-text('Add to Cart')",
+            "a:has-text('ADD TO CART')",
+            "._2KpZ6l._2U9uOA._3v1-ww",
+            "button[class*='_2KpZ6l']",
+            "[data-action='add-to-cart']",
+        ]
+
+        added_count = 0
+        for idx, item in enumerate(target_items, 1):
+            url = item.get("url")
+            title_snippet = item.get("title", f"Product #{idx}")[:40]
+            if not url:
+                item["cart_status"] = "unavailable / out of stock"
+                continue
+
+            self._emit_status("action", f"🛒 [{idx}/{actual_total}] Opening '{title_snippet}...' in same tab", url)
+            logger.info(f"[M5] [{idx}/{actual_total}] Navigating to: {url}")
+
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            except Exception as nav_err:
+                logger.warning(f"[M5] Navigation to product {idx} had warning: {nav_err}")
+
+            await asyncio.sleep(1.0)
+            await self._dismiss_popups()
+
+            # Record pre-click cart count
+            prev_cart_count = 0
+            try:
+                c_str = await page.evaluate("() => document.querySelector('#nav-cart-count')?.innerText || ''")
+                if c_str:
+                    prev_cart_count = int(re.sub(r'\D', '', c_str))
+            except Exception:
+                prev_cart_count = added_count
+
+            # Find the first VISIBLE Add to Cart button (avoids hidden trade-in inputs on Amazon)
+            chosen_btn = None
+            for s in add_cart_selectors:
+                try:
+                    loc = page.locator(s)
+                    cnt = await loc.count()
+                    for b_idx in range(cnt):
+                        btn_cand = loc.nth(b_idx)
+                        if await btn_cand.is_visible():
+                            chosen_btn = btn_cand
+                            break
+                    if chosen_btn:
+                        break
+                except Exception:
+                    continue
+
+            if chosen_btn:
+                try:
+                    await self._click_resiliently(chosen_btn, timeout=4000)
+                    await asyncio.sleep(1.5)
+                except Exception as click_err:
+                    logger.warning(f"[M5] Failed clicking add to cart for item {idx}: {click_err}")
+
+            # Dismiss warranty / protection plan side sheets or modals (common on laptops)
+            upsell_dismiss_selectors = [
+                "#attachSiNoCoverage",
+                "input[aria-labelledby='attachSiNoCoverage-announce']",
+                "#attach-close_sideSheet-link",
+                "#attach-sidesheet-close-button",
+                "#attach-warranty-pane input[data-action='close']",
+                "#attachSiNoCoverage-announce",
+                "[aria-label='Close']",
+            ]
+            for u_sel in upsell_dismiss_selectors:
+                try:
+                    u_btn = page.locator(u_sel).first
+                    if await u_btn.count() > 0 and await u_btn.is_visible():
+                        await u_btn.click(timeout=1500)
+                        await asyncio.sleep(0.5)
+                        break
+                except Exception:
+                    pass
+
+            # Verify addition via cart count increase or confirmation banner
+            item_added = False
+
+            # Check 1: Did #nav-cart-count increase?
+            try:
+                new_cart_str = await page.evaluate("() => document.querySelector('#nav-cart-count')?.innerText || ''")
+                if new_cart_str:
+                    new_count = int(re.sub(r'\D', '', new_cart_str))
+                    if new_count > prev_cart_count:
+                        item_added = True
+                        logger.info(f"[M5] Item {idx}: Cart count increased from {prev_cart_count} to {new_count}")
+            except Exception:
+                pass
+
+            # Check 2: Confirmation banner/message (ensuring it is not empty cart / sign-in screen)
+            if not item_added:
+                try:
+                    has_confirm = await page.evaluate("""
+                        () => {
+                            const conf = document.querySelector('#NATC_SMART_WAGON_CONF_MSG_SUCCESS, #sw-atc-confirmation, .sw-atc-message, .a-size-medium-plus.a-color-base.sw-atc-text, #attach-added-to-cart-message');
+                            if (conf && conf.offsetParent !== null) return true;
+                            const bodyText = document.body ? document.body.innerText : '';
+                            return (bodyText.includes('Added to Cart') || bodyText.includes('Added to Basket')) && !bodyText.includes('Your Amazon Cart is empty') && !bodyText.includes('Sign in to your account');
+                        }
+                    """)
+                    if has_confirm:
+                        item_added = True
+                except Exception:
+                    pass
+
+            # Check 3: Smart wagon page if not empty
+            if not item_added:
+                curr_url = page.url or ""
+                if ("smart-wagon" in curr_url or "sw-atc" in curr_url) and "gp/cart/view.html" not in curr_url:
+                    item_added = True
+
+            if item_added:
+                item["cart_status"] = "added"
+                added_count += 1
+                self._emit_status("action", f"✅ [{idx}/{actual_total}] Added to cart: {title_snippet}")
+                logger.info(f"[M5] [{idx}/{actual_total}] Successfully added to cart: {title_snippet}")
+            else:
+                item["cart_status"] = "unavailable / out of stock"
+                self._emit_status("action", f"⚠️ [{idx}/{actual_total}] Out of stock or buy box missing")
+                logger.warning(f"[M5] [{idx}/{actual_total}] Could not add to cart (out of stock/missing buy box)")
+
+        # Navigate to the platform's cart page in the SAME tab so user sees all items
+        try:
+            curr_url = page.url or ""
+            if "amazon" in curr_url.lower():
+                await page.goto("https://www.amazon.in/gp/cart/view.html", wait_until="domcontentloaded", timeout=15000)
+            elif "flipkart" in curr_url.lower():
+                await page.goto("https://www.flipkart.com/viewcart", wait_until="domcontentloaded", timeout=15000)
+            else:
+                cart_btn = page.locator("#nav-cart, a[href*='/cart'], button[class*='cart']").first
+                if await cart_btn.count() > 0:
+                    await self._click_resiliently(cart_btn, timeout=3000)
+        except Exception as cart_nav_err:
+            logger.warning(f"[M5] Navigating to cart page after completion: {cart_nav_err}")
+
+        # Cross-verify with final cart count if available
+        try:
+            final_count_str = await page.evaluate("() => document.querySelector('#nav-cart-count')?.innerText || ''")
+            if final_count_str:
+                final_count = int(re.sub(r'\D', '', final_count_str))
+                if final_count > 0:
+                    added_count = max(added_count, min(final_count, actual_total))
+        except Exception:
+            pass
+
+        # Update cache so UI has full item status list
+        self._last_extracted_items = target_items
+
+        # Calculate exact percentage
+        completion_pct = int((added_count / actual_total) * 100) if actual_total > 0 else 0
+        summary_msg = f"Added {added_count} of {actual_total} items to cart ({completion_pct}% completed)"
+        action.value = summary_msg
+
+        logger.info(f"[M5] Multi-item cart flow finished: {summary_msg}")
+        if added_count == actual_total:
+            self._emit_status("action_completed", f"🎉 All {actual_total} items added to cart (100% completed)!")
+        elif added_count > 0:
+            self._emit_status("action_partial", f"⚠️ Added {added_count} of {actual_total} items to cart ({completion_pct}% completed)")
+        else:
+            raise RuntimeError(f"Could not add any of the {actual_total} items to cart (items may be out of stock).")
 
     # ── State Capture ─────────────────────────────────────────────────────────
 
@@ -1249,12 +2075,13 @@ class BrowserExecutor:
         if self._last_extracted_items:
             extracted_items = list(self._last_extracted_items)
             direct_link = extracted_items[0].get("url")
-            self._last_extracted_items = []
+            # Preserve self._last_extracted_items so downstream steps and UI retain the items
         elif page and not page.is_closed() and any(k in (url or "").lower() for k in ("search", "s?", "/p/", "/dp/", "results", "query")):
             try:
                 extracted_items = await self._extract_page_products_or_items()
                 if extracted_items:
                     direct_link = extracted_items[0].get("url")
+                    self._last_extracted_items = extracted_items
             except Exception:
                 extracted_items = []
 

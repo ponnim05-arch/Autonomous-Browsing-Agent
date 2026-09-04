@@ -19,6 +19,7 @@ from ..config import AgentConfig, default_config
 from ..llm_client import LLMClient
 from ..model_router import ModelTier, route_for_planning
 from ..models import ActionObject
+from ..utils.json_extractor import extract_json_data
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,58 @@ class ExecutionPlan:
 
 # ── PA-mode planning prompt with smart URL routing ───────────────────────────
 
+def is_multi_cart_task(task: str) -> tuple[bool, int]:
+    """
+    Detect if user wants to add multiple items to the cart, e.g.:
+    "search 10 best laptops under 75k gaming laptops with ryzen 7 processor in amazon and add them to cart"
+    "find top 5 mechanical keyboards and add all to cart"
+    Returns (is_multi, count).
+    """
+    task_l = task.lower()
+    has_cart = any(k in task_l for k in ("cart", "buy"))
+    has_multi = any(k in task_l for k in (
+        "them to cart", "them all to cart", "all to cart", "all to my cart",
+        "add them", "add all", "all of them", "both to cart", "add both"
+    ))
+
+    # Extract item count
+    count = 1
+    m = re.search(
+        r'\b(\d{1,2})\s+(?:best|cheapest|top|gaming|popular|items|products|laptops|phones|mobiles|books|keyboards|shoes|watches|devices|options)\b',
+        task_l
+    )
+    if m:
+        count = int(m.group(1))
+    elif re.search(r'\b(?:best|top|cheapest|first)\s+(\d{1,2})\b', task_l):
+        count = int(re.search(r'\b(?:best|top|cheapest|first)\s+(\d{1,2})\b', task_l).group(1))
+    elif "both" in task_l:
+        count = 2
+
+    is_multi = (has_multi and has_cart) or (count > 1 and has_cart)
+    if not is_multi:
+        return False, 1
+    return True, max(2, min(count, 25))
+
+
+def extract_clean_search_query(task: str) -> str:
+    """Extract clean search query keywords for e-commerce sites from natural language task."""
+    q = task
+    strip_patterns = [
+        r'\b(?:in|on|from)\s+(?:amazon(?:\.in)?|flipkart(?:\.com)?|google)\b',
+        r'\b(?:and\s+)?add\s+(?:them|all|both|it|everything)?\s*(?:all)?\s*to\s*(?:the|my)?\s*cart\b',
+        r'\b(?:and\s+)?buy\s+(?:them|all|now|it)\b',
+        r'\b(?:please\s+)?search\s+(?:for\s+)?',
+        r'\bfind\s+(?:me\s+)?',
+        r'^\s*(?:search|find|get|show|look\s+for)\s+',
+    ]
+    for pat in strip_patterns:
+        q = re.sub(pat, ' ', q, flags=re.IGNORECASE)
+    # Remove leading quantity like "10 best "
+    q = re.sub(r'^\s*\d{1,2}\s+(?:best|top|cheapest)\s+', '', q, flags=re.IGNORECASE)
+    q = " ".join(q.split())
+    return q.strip() or task[:80]
+
+
 _PLAN_PROMPT = """You are an autonomous Personal Assistant (PA) browser agent planner.
 Given a user task, output a JSON action plan to accomplish it FULLY — including interactive actions like adding to cart, booking, filling forms, etc.
 
@@ -89,13 +142,15 @@ ACTION TYPES:
 - fill: type text into an input (target = element description, value = text to type)
 - click: click a button/link (target = element description)
 - scroll: scroll down the page
-- extract: extract structured data from the page (target = what to extract, value = filter e.g. "cheapest")
+- extract: extract structured data from the page (target = what to extract, value = filter or count e.g. "10")
+- add_all_to_cart: sequentially visit and add all extracted products up to target count to cart (target = "extracted_products", value = count e.g. "10")
 - wait: pause for page to load (value = seconds, max 5)
 - select: choose from a dropdown (target = select element, value = option text)
 - press: press a keyboard key (value = key name e.g. "Enter", "Escape", "Tab")
 - dismiss_popup: close popups/overlays/cookie banners before interacting
 
 SMART WEBSITE ROUTING — pick the correct URL based on the task:
+- Videos/music/play/youtube/gaming → https://www.youtube.com/
 - Shopping/products/buy/price → https://www.amazon.in/ or https://www.flipkart.com/
 - Flights/air travel → https://www.makemytrip.com/flights/ or https://www.google.com/travel/flights
 - Train tickets/railway → https://www.irctc.co.in/ or https://www.confirmtkt.com/
@@ -105,12 +160,14 @@ SMART WEBSITE ROUTING — pick the correct URL based on the task:
 - Jobs/careers → https://www.linkedin.com/jobs/ or https://www.naukri.com/
 - News → https://news.google.com/
 - General search → https://www.google.com/
+- If user mentions ANY specific platform or service (e.g. YouTube, Amazon, Flipkart, Reddit, Wikipedia, GitHub, Twitter) → navigate DIRECTLY to that platform's home URL! NEVER navigate to Google if a destination website/platform is specified.
 - Any specific URL mentioned by user → use that exact URL
 
 TARGET KEYWORDS the browser understands:
 - Search: "search_input", "search_button"
-- Products: "cheapest_product", "first_product", "product_link"
-- Cart/Buy: "add_to_cart", "buy_now", "cart_button"
+- Media/Video: "first_video", "play_button", "volume_max", "unmute"
+- Products: "cheapest_product", "first_product", "product_link", "extracted_products"
+- Cart/Buy: "add_to_cart", "add_all_to_cart", "buy_now", "cart_button"
 - Booking: "book_now", "book_button", "reserve_button"
 - Forms: "date_input", "quantity_input", "passenger_input"
 - Navigation: "proceed_button", "continue_button", "next_button"
@@ -119,12 +176,14 @@ TARGET KEYWORDS the browser understands:
 
 RULES:
 - Output ONLY valid JSON, no explanation
-- Plans should be 4-10 steps for interactive tasks (booking, cart, forms)
+- For YouTube/Video: navigate to https://www.youtube.com/ → dismiss_popup → fill search_input with the video/channel query → wait 2s → click first_video → wait 2s → click volume_max (checkpoint: true)
+- Plans should be 4-8 steps for interactive tasks (booking, cart, forms, video play)
 - Plans should be 3-6 steps for search/extract tasks
 - After navigate, add a dismiss_popup step to clear overlays
-- After clicking a product, add a wait step for the page to load
-- For add-to-cart: navigate → search → wait → click product → wait → click add_to_cart
-- For booking: navigate → fill dates → fill details → click search/book → extract confirmation
+- For SINGLE item add-to-cart: navigate → dismiss_popup → fill search_input → wait 2-3s → click cheapest_product/first_product → wait 2-3s → click add_to_cart (checkpoint: true)
+- For MULTI-ITEM add-to-cart (e.g. "search 10 laptops ... add them to cart" or "add all to cart"):
+  navigate → dismiss_popup → fill search_input (clean search keywords) → click search_button → wait 3s → extract search results (value = count) → add_all_to_cart (target = "extracted_products", value = count, checkpoint: true). This ensures ALL requested items are sequentially visited in the same browser window and added to cart!
+- For buy-now: navigate → dismiss_popup → fill search_input → wait 2-3s → click cheapest_product/first_product → wait 2-3s → click buy_now (checkpoint: true)
 - Mark the final action step as checkpoint: true
 - The last step MUST be a checkpoint
 
@@ -215,13 +274,12 @@ Focus on alternative approaches. Do NOT repeat failed actions."""
 
     def _parse_plan(self, response: str, fallback_task: str) -> ExecutionPlan:
         """Parse LLM response into an ExecutionPlan."""
-        json_match = re.search(r"\{[\s\S]*\}", response)
-        if not json_match:
-            logger.warning("[Planner] No JSON found, using fallback plan.")
+        data = extract_json_data(response)
+        if not data or not isinstance(data, dict):
+            logger.warning("[Planner] No valid JSON found, using fallback plan.")
             return self._fallback_plan(fallback_task)
 
         try:
-            data = json.loads(json_match.group())
             steps = []
             for s in data.get("steps", []):
                 steps.append(PlannedStep(
@@ -235,6 +293,82 @@ Focus on alternative approaches. Do NOT repeat failed actions."""
             if not steps:
                 return self._fallback_plan(fallback_task)
 
+            # Smart URL routing enforcement: ensure navigation matches user platform
+            task_lower = fallback_task.lower()
+            if steps and steps[0].action == "navigate":
+                target_val = steps[0].value or ""
+                if "youtube" in task_lower and "youtube.com" not in target_val:
+                    logger.info("[Planner] Overriding navigation to https://www.youtube.com/ based on user goal")
+                    steps[0].value = "https://www.youtube.com/"
+                    steps[0].description = "Go to YouTube"
+                elif "amazon" in task_lower and "amazon" not in target_val:
+                    logger.info("[Planner] Overriding navigation to https://www.amazon.in/ based on user goal")
+                    steps[0].value = "https://www.amazon.in/"
+                    steps[0].description = "Go to Amazon"
+                elif "flipkart" in task_lower and "flipkart" not in target_val:
+                    logger.info("[Planner] Overriding navigation to https://www.flipkart.com/ based on user goal")
+                    steps[0].value = "https://www.flipkart.com/"
+                    steps[0].description = "Go to Flipkart"
+
+            # Deduplicate redundant multiple cart/buy steps
+            seen_cart = False
+            seen_buy = False
+            pruned_steps = []
+            for s in steps:
+                target_l = (s.target or "").lower()
+                if s.action == "click" and any(k in target_l for k in ("add_to_cart", "add to cart", "add_cart", "addtocart")):
+                    if seen_cart:
+                        logger.info("[Planner] Dropping redundant duplicate add_to_cart step")
+                        continue
+                    seen_cart = True
+                if s.action == "click" and any(k in target_l for k in ("buy_now", "buy now", "buynow")):
+                    if seen_buy:
+                        logger.info("[Planner] Dropping redundant duplicate buy_now step")
+                        continue
+                    seen_buy = True
+                pruned_steps.append(s)
+            steps = pruned_steps
+
+            # Multi-item cart enforcement: ensure all items are requested to be added to cart
+            is_multi, target_count = is_multi_cart_task(fallback_task)
+            if is_multi:
+                logger.info(f"[Planner] Multi-item cart task detected: target_count={target_count}")
+                # Clean up search input value if too verbose
+                clean_query = extract_clean_search_query(fallback_task)
+                for s in steps:
+                    if s.action in ("fill", "type") and any(k in (s.target or "").lower() for k in ("search", "query", "input")):
+                        s.value = clean_query
+                        s.description = f"Search for {clean_query}"
+                        break
+
+                # Check if plan already has add_all_to_cart
+                has_add_all = any(s.action == "add_all_to_cart" or "add_all" in (s.target or "").lower() for s in steps)
+                if not has_add_all:
+                    # Replace single product click + single add_to_cart with extract + add_all_to_cart
+                    filtered_steps = []
+                    for s in steps:
+                        target_l = (s.target or "").lower()
+                        # Drop single item product clicks or single add_to_cart
+                        if s.action == "click" and any(k in target_l for k in ("product", "first_product", "cheapest_product", "add_to_cart", "add to cart")):
+                            continue
+                        filtered_steps.append(s)
+
+                    filtered_steps.append(PlannedStep(
+                        action="extract",
+                        target="search results",
+                        value=str(target_count),
+                        checkpoint=False,
+                        description=f"Extract top {target_count} products and direct links",
+                    ))
+                    filtered_steps.append(PlannedStep(
+                        action="add_all_to_cart",
+                        target="extracted_products",
+                        value=str(target_count),
+                        checkpoint=True,
+                        description=f"Add all {target_count} items to cart",
+                    ))
+                    steps = filtered_steps
+
             # Ensure last step is a checkpoint
             steps[-1].checkpoint = True
 
@@ -244,13 +378,74 @@ Focus on alternative approaches. Do NOT repeat failed actions."""
                 success_criteria=data.get("success_criteria", ""),
                 domain=data.get("domain", ""),
             )
-        except (json.JSONDecodeError, TypeError, ValueError, KeyError) as e:
+        except (TypeError, ValueError, KeyError) as e:
             logger.warning(f"[Planner] Parse error: {e}. Using fallback.")
             return self._fallback_plan(fallback_task)
 
     @staticmethod
     def _fallback_plan(task: str) -> ExecutionPlan:
-        """Minimal fallback plan when parsing fails."""
+        """Task-aware fallback plan when LLM response is unavailable or invalid."""
+        task_lower = task.lower()
+        is_multi, target_count = is_multi_cart_task(task)
+        clean_q = extract_clean_search_query(task)
+
+        if any(k in task_lower for k in ("youtube", "video", "play", "music", "song")):
+            query = task
+            for word in ("play", "the", "in youtube", "on youtube", "video", "latest", "and put sound and volume to max", "and put volume to max"):
+                query = re.sub(rf"\b{re.escape(word)}\b", "", query, flags=re.IGNORECASE)
+            query = query.strip() or task
+
+            return ExecutionPlan(
+                task_type="media_playback",
+                domain="youtube.com",
+                success_criteria=f"Play video for '{query}' with sound",
+                steps=[
+                    PlannedStep(action="navigate", value="https://www.youtube.com/", description="Go to YouTube"),
+                    PlannedStep(action="dismiss_popup", target="close_popup", description="Dismiss any popups"),
+                    PlannedStep(action="fill", target="search_input", value=query, description=f"Search for {query}"),
+                    PlannedStep(action="wait", value="2", description="Wait for results"),
+                    PlannedStep(action="click", target="first_video", description="Click first video result"),
+                    PlannedStep(action="wait", value="2", description="Wait for video to load"),
+                    PlannedStep(action="click", target="play_button", description="Ensure video is playing"),
+                    PlannedStep(action="click", target="volume_max", checkpoint=True, description="Set volume to max"),
+                ],
+            )
+
+        if "amazon" in task_lower or ("flipkart" not in task_lower and is_multi):
+            dest_url = "https://www.flipkart.com/" if "flipkart" in task_lower else "https://www.amazon.in/"
+            domain = "flipkart.com" if "flipkart" in task_lower else "amazon.in"
+
+            if is_multi:
+                return ExecutionPlan(
+                    task_type="purchase",
+                    domain=domain,
+                    success_criteria=f"Add top {target_count} items to cart for: {clean_q}",
+                    steps=[
+                        PlannedStep(action="navigate", value=dest_url, description=f"Go to {domain}"),
+                        PlannedStep(action="dismiss_popup", target="close_popup", description="Dismiss banners"),
+                        PlannedStep(action="fill", target="search_input", value=clean_q, description=f"Search for {clean_q}"),
+                        PlannedStep(action="click", target="search_button", description="Submit search"),
+                        PlannedStep(action="wait", value="3", description="Wait for search results"),
+                        PlannedStep(action="extract", target="search results", value=str(target_count), description=f"Extract top {target_count} items"),
+                        PlannedStep(action="add_all_to_cart", target="extracted_products", value=str(target_count), checkpoint=True, description=f"Add all {target_count} items to cart"),
+                    ],
+                )
+
+            return ExecutionPlan(
+                task_type="purchase",
+                domain=domain,
+                success_criteria=f"Find and add item to cart: {task}",
+                steps=[
+                    PlannedStep(action="navigate", value=dest_url, description=f"Go to {domain}"),
+                    PlannedStep(action="dismiss_popup", target="close_popup", description="Dismiss banners"),
+                    PlannedStep(action="fill", target="search_input", value=clean_q, description="Search for item"),
+                    PlannedStep(action="click", target="search_button", description="Submit search"),
+                    PlannedStep(action="wait", value="2", description="Wait for results"),
+                    PlannedStep(action="click", target="first_product", description="Open product details"),
+                    PlannedStep(action="click", target="add_to_cart", checkpoint=True, description="Add to cart"),
+                ],
+            )
+
         return ExecutionPlan(
             task_type="other",
             domain="general",

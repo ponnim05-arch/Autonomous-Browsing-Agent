@@ -18,6 +18,7 @@ from ..config import AgentConfig, default_config
 from ..llm_client import LLMClient
 from ..models import ActionObject, GoalObject, PageState, PromptContext, SubTask, StrategyContext
 from ..modules.prompt_generator import PromptGenerator
+from ..utils.json_extractor import extract_json_data
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +83,13 @@ class ActionSelector:
 
     def _parse_action(self, text: str) -> ActionObject:
         """Extract and validate ActionObject JSON from LLM response."""
-        json_match = re.search(r"\{[\s\S]*?\}", text)
-        if not json_match:
+        data = extract_json_data(text)
+        if not data or not isinstance(data, dict):
             logger.warning("[M7] No JSON found in action response. Using wait fallback.")
             return _FALLBACK_WAIT
 
         try:
-            data = json.loads(json_match.group())
             return ActionObject(**data)
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
+        except (TypeError, ValueError) as e:
             logger.warning(f"[M7] Action parse error: {e}. Retrying with extract fallback.")
             return _FALLBACK_EXTRACT

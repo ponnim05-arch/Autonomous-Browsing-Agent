@@ -87,6 +87,9 @@ class LLMClient:
         """
         self._call_count += 1
         self._fast_call_count += 1
+        if self._provider != "nvidia":
+            return await self.complete(prompt, temperature)
+
         logger.debug(f"[LLM] Fast model call ({self.config.fast_model})")
         try:
             return await self._call_nvidia_model(
@@ -106,6 +109,9 @@ class LLMClient:
         """
         self._call_count += 1
         self._reasoning_call_count += 1
+        if self._provider != "nvidia":
+            return await self.complete(prompt, temperature)
+
         logger.debug(f"[LLM] Reasoning model call ({self.config.reasoning_model})")
         try:
             return await self._call_nvidia_model(
@@ -131,6 +137,7 @@ class LLMClient:
             self._nvidia_client = AsyncOpenAI(
                 base_url=self.config.nvidia_base_url,
                 api_key=api_key,
+                default_headers={"Accept": "application/json"},
                 timeout=45.0,
             )
         return self._nvidia_client
