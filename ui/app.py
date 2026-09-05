@@ -40,7 +40,7 @@ for _mod_name in list(sys.modules.keys()):
 
 import re
 
-from agent_framework.config import AgentConfig
+from agent_framework.config import AgentConfig, DEFAULT_NVIDIA_API_KEY
 from agent_framework.models import (
     ActionObject, GoalObject, PageState, PromptContext,
     SubTask, StrategyContext, VerificationResult, RepairInput,
@@ -293,22 +293,37 @@ if page == "🏠 Home":
             help="Keep the browser window open across tasks so all actions execute in the same window without reopening.",
         )
 
-        # CDP-specific settings
+        st.markdown(
+            """
+            <div style="background: rgba(46, 125, 50, 0.15); border: 1px solid rgba(76, 175, 80, 0.4); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span style="font-size: 1.1rem;">🟢</span>
+                    <div>
+                        <strong style="color: #81c784; font-size: 0.85rem;">NVIDIA AI Cloud Built-in</strong>
+                        <div style="font-size: 0.75rem; color: #a5d6a7;">Ready out-of-the-box — no API key or setup needed!</div>
+                    </div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
         cdp_endpoint = "http://127.0.0.1:9222"
         clean_browser_mode = browser_mode_choice.split(" ")[0].strip()
-        if clean_browser_mode == "cdp":
-            cdp_endpoint = st.text_input(
-                "CDP Endpoint",
-                value="http://127.0.0.1:9222",
-                help="Start Chrome with: chrome.exe --remote-debugging-port=9222",
-            )
 
-        api_key_override = st.text_input(
-            "API Key (Optional override)",
-            type="password",
-            placeholder="Loaded from .env by default",
-            help="You can paste an API key directly here or save it in your .env file",
-        )
+        with st.expander("⚙️ Advanced Settings (Custom Key & CDP)", expanded=False):
+            api_key_override = st.text_input(
+                "Custom API Key (Optional)",
+                type="password",
+                placeholder="Using built-in NVIDIA key by default",
+                help="Leave blank to use the built-in NVIDIA AI Cloud key, or paste your own custom key here.",
+            )
+            if clean_browser_mode == "cdp":
+                cdp_endpoint = st.text_input(
+                    "CDP Endpoint",
+                    value="http://127.0.0.1:9222",
+                    help="Start Chrome with: chrome.exe --remote-debugging-port=9222",
+                )
 
     clean_strategy = strategy_mode.split(" ")[0].strip()
 
@@ -408,7 +423,7 @@ if page == "🏠 Home":
         run_config = AgentConfig()
 
         if provider == "nvidia":
-            current_key = run_config.nvidia_api_key or os.getenv("NVIDIA_API_KEY")
+            current_key = api_key_override.strip() or run_config.nvidia_api_key or os.getenv("NVIDIA_API_KEY") or DEFAULT_NVIDIA_API_KEY
         elif provider == "gemini":
             current_key = run_config.gemini_api_key or os.getenv("GEMINI_API_KEY")
         elif provider == "openai":
@@ -419,7 +434,7 @@ if page == "🏠 Home":
         if not goal_input.strip():
             st.warning("Please enter a goal.")
         elif not current_key or not current_key.strip():
-            st.error(f"❌ No API key found for provider `{provider.upper()}`. Set `{provider.upper()}_API_KEY` in your `.env` file or paste it into the API Key box above.")
+            st.error(f"❌ No API key found for provider `{provider.upper()}`. Set `{provider.upper()}_API_KEY` in your `.env` file or paste it into Advanced Settings above.")
         else:
             # Store browser mode in session state for Agent View
             st.session_state.browser_mode = clean_browser_mode
@@ -701,6 +716,12 @@ elif page == "🤖 Agent View":
                                 prev_page = page_state
                                 state_mgr.mark_step_complete(i)
 
+                            # Smoothly yield manual control to the user after finishing all actions
+                            try:
+                                await browser.yield_control_to_user()
+                            except Exception:
+                                pass
+
                         if has_step_failures:
                             final_status = "partial" if completed_steps > 0 else "failed"
                         elif has_step_partial:
@@ -849,6 +870,12 @@ elif page == "🤖 Agent View":
 
                                     retry_count += 1
 
+                            # Smoothly yield manual control to the user after finishing all actions
+                            try:
+                                await browser.yield_control_to_user()
+                            except Exception:
+                                pass
+
                         c_status = "success" if not has_failure else ("partial" if completed_cnt > 0 else "failed")
                         return c_status, p_actions, p_retries, p_tokens, completed_cnt, len(subtasks), first_err, failed_idx
 
@@ -889,6 +916,7 @@ elif page == "🤖 Agent View":
                 if final_status == "success":
                     progress.progress(1.0, text=f"✅ Task Completed 100% in {elapsed:.1f}s!")
                     st.success(f"🎉 **Task 100% Completed in {elapsed:.1f}s!** All {total_steps} steps succeeded.")
+                    st.info("✨ **Manual Control Yielded:** The browser tab is open and playing. The agent has exited from the tab — you have full manual control.")
                 elif final_status == "partial":
                     progress.progress(pct, text=f"⚠️ Task Partially Completed ({display_pct}%) in {elapsed:.1f}s")
                     st.warning(f"⚠️ **Task Partially Completed ({display_pct}%):** {failure_reason}")
@@ -959,8 +987,22 @@ elif page == "🤖 Agent View":
 
         # Show Extracted Products & Direct Links if available
         if st.session_state.get("extracted_products"):
-            st.subheader("🛍️ Extracted Products & Direct Links")
             prods = st.session_state.extracted_products
+            valid_urls = [p["url"] for p in prods if p.get("url")]
+
+            hdr_col1, hdr_col2 = st.columns([3, 1])
+            hdr_col1.subheader("🛍️ Extracted Products & Direct Links")
+            if valid_urls:
+                if hdr_col2.button("🚀 Open All Links in Tabs", key="open_all_prods_btn", help="Open all extracted product pages in separate browser tabs"):
+                    import streamlit.components.v1 as components
+                    js_code = f"""
+                    <script>
+                        const urls = {valid_urls!r};
+                        urls.forEach(url => window.open(url, '_blank'));
+                    </script>
+                    """
+                    components.html(js_code, height=0)
+                    st.toast(f"Opening {len(valid_urls)} product links in new browser tabs! (Please allow popups if prompted)")
 
             # Show Cart Progress Header if multi-item cart task
             cart_added = sum(1 for p in prods if p.get("cart_status") == "added")
