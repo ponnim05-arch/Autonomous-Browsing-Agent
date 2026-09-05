@@ -53,6 +53,18 @@ logs/runs/*
 .DS_Store
 Thumbs.db
 
+# Frontend & Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+*.tsbuildinfo
+
+# Scraped / temporary data
+data/*.json
+!data/.gitkeep
+.playwright-mcp/
+
 # Agent configs / local caches
 .agents/
 .claude/

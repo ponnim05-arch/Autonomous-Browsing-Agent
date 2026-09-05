@@ -95,6 +95,26 @@ class BrowserExecutor:
     _shared_context: Any = None
     _shared_page: Any = None
 
+    @classmethod
+    async def close_shared_session(cls) -> None:
+        """Explicitly close and reset the class-level shared browser session."""
+        try:
+            if cls._shared_browser:
+                await cls._shared_browser.close()
+        except Exception:
+            pass
+        finally:
+            cls._shared_browser = None
+            cls._shared_context = None
+            cls._shared_page = None
+            try:
+                if cls._shared_playwright:
+                    await cls._shared_playwright.stop()
+            except Exception:
+                pass
+            finally:
+                cls._shared_playwright = None
+
     def __init__(
         self,
         config: AgentConfig = default_config,
@@ -217,16 +237,61 @@ class BrowserExecutor:
             await self.start()
             return self
         except Exception:
-            await self.stop()
+            # On startup failure, force-close to clean up stale shared session
+            # pointers. Without force_close, stop() with reuse_session=True
+            # skips cleanup, leaving corrupted shared state that causes every
+            # subsequent run to fail with the same error.
+            await self.stop(force_close=True)
             raise
 
-    async def __aexit__(self, *_) -> None:
-        await self.stop()
+    async def __aexit__(self, exc_type, *_) -> None:
+        # If exiting due to an exception, force-close so the next run starts
+        # fresh instead of inheriting a broken shared session.
+        if exc_type is not None:
+            await self.stop(force_close=True)
+        else:
+            await self.stop()
+
+    @staticmethod
+    def _kill_zombie_playwright_browsers() -> None:
+        """Kill orphaned Playwright-launched browser processes on Windows.
+
+        When Playwright's subprocess transport crashes or the Python process is
+        interrupted, browser child processes (chrome.exe from ms-playwright) can
+        linger and lock ports or user-data directories, preventing new launches.
+        This method surgically kills only Playwright-managed browser processes
+        (identified by their install path) — never the user's regular browser.
+        """
+        import subprocess
+        try:
+            # Only kill chrome.exe processes launched from the Playwright install dir
+            result = subprocess.run(
+                ['wmic', 'process', 'where',
+                 "name='chrome.exe' and CommandLine like '%ms-playwright%'",
+                 'get', 'ProcessId'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+            )
+            pids = [line.strip() for line in result.stdout.splitlines()
+                    if line.strip().isdigit()]
+            for pid in pids:
+                try:
+                    subprocess.run(['taskkill', '/F', '/PID', pid],
+                                   capture_output=True, timeout=3,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                    logger.info(f"[M5] Killed zombie Playwright browser process PID={pid}")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"[M5] Zombie browser cleanup skipped: {e}")
 
     async def start(self) -> None:
         """
         Initialize Playwright -> Browser -> Context -> Page (or connect via CDP).
         Guarantees that all required browser resources are initialized or raises BrowserStartupError.
+
+        Resilience: If all launch attempts fail, performs zombie process cleanup
+        and retries once before raising the error.
         """
         if self._is_started and self._page and not self._page.is_closed():
             logger.debug("[M5] BrowserExecutor already running and healthy.")
@@ -256,14 +321,17 @@ class BrowserExecutor:
                     self._browser = shared_b
                     self._context = shared_ctx
 
-                    # Ensure we have an active, open page
-                    page = BrowserExecutor._shared_page
-                    if not page or page.is_closed():
-                        pages = self._context.pages
-                        if pages and not pages[-1].is_closed():
-                            page = pages[-1]
-                        else:
-                            page = await self._context.new_page()
+                    # Ensure we have an active, open page in the same window.
+                    # If existing tabs have content, open a new tab in the same window!
+                    open_pages = [p for p in self._context.pages if not p.is_closed()]
+                    curr_page = BrowserExecutor._shared_page
+                    if (curr_page and not curr_page.is_closed() and curr_page.url not in ("", "about:blank")) or any(p.url not in ("", "about:blank") for p in open_pages):
+                        logger.info("[M5] Opening task in a new tab in the same browser window.")
+                        page = await self._context.new_page()
+                    elif open_pages:
+                        page = open_pages[-1]
+                    else:
+                        page = await self._context.new_page()
 
                     self._page = page
                     BrowserExecutor._shared_page = page
@@ -281,41 +349,104 @@ class BrowserExecutor:
                 logger.warning(f"[M5] Could not attach to shared browser: {e}. Launching fresh instance...")
                 await BrowserExecutor.close_shared_session()
 
-        self._emit_status("browser_starting", f"🌐 Starting browser (mode={browser_mode}, type={self.config.browser_type})...")
+        # ── Fresh launch with automatic retry ──────────────────────────────
+        last_startup_error: Exception | None = None
+        for attempt in range(2):  # attempt 0 = normal, attempt 1 = after zombie cleanup
+            if attempt == 1:
+                logger.warning("[M5] First browser launch failed. Cleaning up zombie processes and retrying...")
+                self._emit_status("browser_starting", "🔄 Retrying browser launch after cleanup...")
+                # Force-clean any stale shared session state
+                await BrowserExecutor.close_shared_session()
+                # Kill orphaned Playwright browser processes
+                self._kill_zombie_playwright_browsers()
+                await asyncio.sleep(1)  # Brief pause for OS to release resources
+
+            self._emit_status("browser_starting", f"🌐 Starting browser (mode={browser_mode}, type={self.config.browser_type})...")
+
+            try:
+                self._playwright = await async_playwright().start()
+
+                if connection_mode == "cdp":
+                    await self._start_cdp()
+                else:
+                    await self._start_playwright()
+
+                if self.reuse_session:
+                    BrowserExecutor._shared_playwright = self._playwright
+                    BrowserExecutor._shared_browser = self._browser
+                    BrowserExecutor._shared_context = self._context
+                    BrowserExecutor._shared_page = self._page
+
+                self._is_started = True
+                self._emit_status("browser_started", f"✅ Browser started (mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})")
+                logger.info(
+                    f"[M5] BrowserExecutor ready (mode={connection_mode}, browser_mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})"
+                )
+                return  # Success — exit the retry loop
+
+            except BrowserStartupError as bse:
+                last_startup_error = bse
+                self._emit_status("browser_error", f"❌ Browser startup failed (attempt {attempt + 1}/2)")
+                # Clean up this failed attempt's resources
+                await self._cleanup_failed_start()
+                if attempt == 0:
+                    continue  # Try again after zombie cleanup
+                # Final attempt failed — raise below
+
+            except Exception as exc:
+                last_startup_error = exc
+                self._emit_status("browser_error", f"❌ Could not start browser (attempt {attempt + 1}/2): {exc}")
+                # Clean up this failed attempt's resources
+                await self._cleanup_failed_start()
+                if attempt == 0:
+                    continue  # Try again after zombie cleanup
+                # Final attempt failed — wrap and raise below
+
+        # Both attempts failed — raise the error
+        # Always force-clean shared session state so the NEXT run starts fresh
+        await BrowserExecutor.close_shared_session()
+
+        if isinstance(last_startup_error, BrowserStartupError):
+            raise last_startup_error
+
+        diag = self.get_diagnostics(self.config)
+        diag["startup_error"] = str(last_startup_error)
+        raise BrowserStartupError(
+            f"Failed to start browser session after 2 attempts: {last_startup_error}",
+            diagnostics=diag,
+            suggested_fix="Ensure browser binaries are installed via 'python -m playwright install chromium' or verify CDP endpoint.",
+        ) from last_startup_error
+
+    async def _cleanup_failed_start(self) -> None:
+        """Clean up resources from a failed start() attempt without touching shared session."""
+        try:
+            if self._page and not self._page.is_closed():
+                await self._page.close()
+        except Exception:
+            pass
+        self._page = None
 
         try:
-            self._playwright = await async_playwright().start()
+            if self._context:
+                await self._context.close()
+        except Exception:
+            pass
+        self._context = None
 
-            if connection_mode == "cdp":
-                await self._start_cdp()
-            else:
-                await self._start_playwright()
+        try:
+            if self._browser and self._browser.is_connected():
+                await self._browser.close()
+        except Exception:
+            pass
+        self._browser = None
 
-            if self.reuse_session:
-                BrowserExecutor._shared_playwright = self._playwright
-                BrowserExecutor._shared_browser = self._browser
-                BrowserExecutor._shared_context = self._context
-                BrowserExecutor._shared_page = self._page
-
-            self._is_started = True
-            self._emit_status("browser_started", f"✅ Browser started (mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})")
-            logger.info(
-                f"[M5] BrowserExecutor ready (mode={connection_mode}, browser_mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})"
-            )
-        except BrowserStartupError:
-            self._emit_status("browser_error", "❌ Browser startup failed")
-            await self.stop()
-            raise
-        except Exception as exc:
-            self._emit_status("browser_error", f"❌ Could not start browser: {exc}")
-            await self.stop()
-            diag = self.get_diagnostics(self.config)
-            diag["startup_error"] = str(exc)
-            raise BrowserStartupError(
-                f"Failed to start browser session: {exc}",
-                diagnostics=diag,
-                suggested_fix="Ensure browser binaries are installed via 'python -m playwright install chromium' or verify CDP endpoint.",
-            ) from exc
+        try:
+            if self._playwright:
+                await self._playwright.stop()
+        except Exception:
+            pass
+        self._playwright = None
+        self._is_started = False
 
     async def _start_cdp(self) -> None:
         """Connect to an existing Chrome/Chromium instance via Chrome DevTools Protocol."""
@@ -334,11 +465,19 @@ class BrowserExecutor:
                     locale="en-IN",
                 )
 
-            pages = self._context.pages
-            if pages:
-                self._page = pages[0]
+            open_pages = [p for p in self._context.pages if not p.is_closed()]
+            if any(p.url not in ("", "about:blank") for p in open_pages):
+                logger.info("[M5] Opening task in a new tab in the same browser window (CDP).")
+                self._page = await self._context.new_page()
+            elif open_pages:
+                self._page = open_pages[-1]
             else:
                 self._page = await self._context.new_page()
+
+            try:
+                await self._page.bring_to_front()
+            except Exception:
+                pass
 
             logger.info(f"[M5] Successfully connected to CDP browser ({endpoint})")
         except Exception as exc:
@@ -502,15 +641,32 @@ class BrowserExecutor:
 
         If reuse_session is True and not force_close, the browser window stays open
         for subsequent tasks to execute in the same window.
+
+        If the browser was never successfully started (_is_started is False and
+        we have no healthy browser), we skip the keep-alive shortcut and do
+        full cleanup to avoid leaving stale shared pointers that poison future runs.
         """
         keep_open = getattr(self.config, "keep_browser_open", False)
 
-        if self.reuse_session and not force_close:
+        # Only keep the browser alive if it's actually healthy.
+        # If _is_started is False (startup failed) or the browser is disconnected,
+        # we MUST do full cleanup — otherwise the stale shared session pointers
+        # will cause every subsequent run to fail.
+        browser_is_healthy = (
+            self._browser is not None
+            and (hasattr(self._browser, 'is_connected') and self._browser.is_connected())
+        )
+
+        if self.reuse_session and not force_close and browser_is_healthy:
             logger.info("[M5] reuse_session=True — browser window kept alive for subsequent tasks.")
             self._emit_status("browser_kept_open", "🌐 Browser window kept open for subsequent tasks")
             self._is_started = False
             self._selector_cache.clear()
             return
+
+        if self.reuse_session and not force_close and not browser_is_healthy:
+            logger.warning("[M5] reuse_session=True but browser is unhealthy. Forcing full cleanup.")
+            force_close = True  # Override to ensure shared session is cleaned
 
         if not self.reuse_session and keep_open and self._browser and not self._is_cdp:
             # Leave the browser window open — only release Python handles
