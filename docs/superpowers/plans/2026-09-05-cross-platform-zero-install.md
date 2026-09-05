@@ -28,7 +28,7 @@
 - Consumes: `os.getenv("NVIDIA_API_KEY")`
 - Produces: `AgentConfig.nvidia_api_key -> str` (never returns None when default key is configured)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tests/test_default_nvidia_config.py`:
 ```python
@@ -49,12 +49,12 @@ def test_custom_nvidia_api_key_override():
         assert config.nvidia_api_key == custom_key
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_default_nvidia_config.py -v`
 Expected: FAIL with "ImportError: cannot import name 'DEFAULT_NVIDIA_API_KEY' from 'agent_framework.config'"
 
-- [ ] **Step 3: Implement the minimal code to make test pass**
+- [x] **Step 3: Implement the minimal code to make test pass**
 
 In `src/agent_framework/config.py`, add:
 ```python
@@ -68,12 +68,12 @@ And update `nvidia_api_key` property:
         return os.getenv("NVIDIA_API_KEY") or DEFAULT_NVIDIA_API_KEY
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_default_nvidia_config.py -v`
 Expected: PASS (2 passed)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/agent_framework/config.py tests/test_default_nvidia_config.py
@@ -91,7 +91,7 @@ git commit -m "feat: embed default built-in NVIDIA API key with override support
 - Consumes: `AgentConfig.nvidia_api_key`
 - Produces: Seamless execution without requiring user API key input
 
-- [ ] **Step 1: Update API key UI and validation in `ui/app.py`**
+- [x] **Step 1: Update API key UI and validation in `ui/app.py`**
 
 In `ui/app.py`:
 1. Move the manual API key input into an optional collapsible expander:
@@ -115,12 +115,12 @@ In `ui/app.py`:
 ```
 And ensure execution is never blocked if `provider == "nvidia"` and `current_key` is present (which it always will be from default).
 
-- [ ] **Step 2: Run pytest to ensure no agent framework regressions**
+- [x] **Step 2: Run pytest to ensure no agent framework regressions**
 
 Run: `pytest tests/test_default_nvidia_config.py -v`
 Expected: PASS
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add ui/app.py
@@ -140,7 +140,7 @@ git commit -m "feat(ui): make NVIDIA key optional with built-in default badge"
 - Consumes: Web standards for PWA (Web App Manifest, Viewport meta)
 - Produces: Add to Home screen / Install App capability on Android and Windows
 
-- [ ] **Step 1: Create `ui/static/manifest.json`**
+- [x] **Step 1: Create `ui/static/manifest.json`**
 
 ```json
 {
@@ -162,11 +162,11 @@ git commit -m "feat(ui): make NVIDIA key optional with built-in default badge"
 }
 ```
 
-- [ ] **Step 2: Create `ui/static/icon.svg`**
+- [x] **Step 2: Create `ui/static/icon.svg`**
 
 Create modern SVG robot / autonomous agent icon for home screen launcher.
 
-- [ ] **Step 3: Inject PWA meta tags and mobile responsive CSS into `ui/app.py`**
+- [x] **Step 3: Inject PWA meta tags and mobile responsive CSS into `ui/app.py`**
 
 In `ui/app.py`, inject the meta tags into `st.markdown(..., unsafe_allow_html=True)`:
 ```html
@@ -182,7 +182,7 @@ Add responsive CSS rules for mobile screens (`@media (max-width: 768px)`):
 - Full-width responsive image/viewport container for agent screenshots.
 - Touch padding on dropdowns and inputs.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add ui/static/manifest.json ui/static/icon.svg ui/app.py
@@ -200,7 +200,7 @@ git commit -m "feat: add PWA manifest, app icons, and mobile responsive touch st
 - Consumes: Local `.venv` directory
 - Produces: Double-click launch experience on Windows without manual commands
 
-- [ ] **Step 1: Create `Launch_App.bat`**
+- [x] **Step 1: Create `Launch_App.bat`**
 
 Write script that:
 1. Detects `.venv\Scripts\python.exe` or system Python.
@@ -208,11 +208,11 @@ Write script that:
 3. Opens default browser to `http://localhost:8501`.
 4. Runs Streamlit seamlessly.
 
-- [ ] **Step 2: Verify launcher script syntax**
+- [x] **Step 2: Verify launcher script syntax**
 
 Run: `cmd.exe /c "Launch_App.bat --test"` or verify syntax.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add Launch_App.bat
@@ -226,12 +226,12 @@ git commit -m "feat: add 1-click Windows launcher for zero-install local use"
 **Files:**
 - Tests: `tests/`
 
-- [ ] **Step 1: Run complete pytest suite**
+- [x] **Step 1: Run complete pytest suite**
 
 Run: `pytest -v`
 Expected: 29 passed (all 28 original + 1 new test file).
 
-- [ ] **Step 2: Commit any cleanups**
+- [x] **Step 2: Commit any cleanups**
 
 ```bash
 git status
