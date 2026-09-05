@@ -13,14 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import load_dotenv
 
+DEFAULT_NVIDIA_API_KEY: str = "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"
+
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 
 def _reload_env() -> None:
     if ENV_PATH.exists():
-        load_dotenv(dotenv_path=ENV_PATH, override=True)
+        load_dotenv(dotenv_path=ENV_PATH, override=False)
     else:
-        load_dotenv(override=True)
+        load_dotenv(override=False)
 
 
 _reload_env()
@@ -147,9 +149,9 @@ class AgentConfig:
 
     # ── API Keys (read-only references) ───────────────────────────
     @property
-    def nvidia_api_key(self) -> str | None:
+    def nvidia_api_key(self) -> str:
         _reload_env()
-        return os.getenv("NVIDIA_API_KEY")
+        return os.getenv("NVIDIA_API_KEY") or DEFAULT_NVIDIA_API_KEY
 
     @property
     def nvidia_base_url(self) -> str:
