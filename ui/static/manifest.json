@@ -1,0 +1,20 @@
+{
+  "name": "AutoAgent - Autonomous Web Agent",
+  "short_name": "AutoAgent",
+  "description": "Adaptive autonomous web browsing agent powered by NVIDIA AI Cloud",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0e1117",
+  "theme_color": "#0e1117",
+  "categories": ["utilities", "productivity", "developer tools"],
+  "icons": [
+    {
+      "src": "/app/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

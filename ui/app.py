@@ -74,6 +74,50 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── PWA & Mobile Meta Headers + Responsive CSS ───────────────────────────────
+st.markdown(
+    """
+    <head>
+        <link rel="manifest" href="/app/static/manifest.json">
+        <link rel="icon" type="image/svg+xml" href="/app/static/icon.svg">
+        <link rel="apple-touch-icon" href="/app/static/icon.svg">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="theme-color" content="#0e1117">
+    </head>
+    <style>
+        /* Mobile-first touch and viewport styles */
+        @media (max-width: 768px) {
+            .stButton > button {
+                width: 100% !important;
+                min-height: 48px !important;
+                font-size: 1rem !important;
+                border-radius: 8px !important;
+                margin-top: 4px !important;
+                margin-bottom: 4px !important;
+            }
+            img {
+                max-width: 100% !important;
+                height: auto !important;
+                border-radius: 6px !important;
+            }
+            textarea, input[type="text"] {
+                font-size: 16px !important;
+            }
+            .block-container {
+                padding-top: 1rem !important;
+                padding-bottom: 2rem !important;
+                padding-left: 0.75rem !important;
+                padding-right: 0.75rem !important;
+            }
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ── Global State ──────────────────────────────────────────────────────────────
 _DEFAULT_STATE = {
     "nav_page": "🏠 Home",
@@ -219,6 +263,16 @@ with st.sidebar:
     st.caption(f"Browser: `{config.browser_type}` | Mode: `{config.browser_mode}`")
     st.caption(f"Batch Execution: `{'Enabled' if config.enable_batch_execution else 'Disabled'}`")
     st.caption(f"Storage: `{config.storage_backend}`")
+
+    with st.expander("📱 Install as Android/Windows App", expanded=False):
+        st.markdown(
+            """
+            **To run like a normal app:**
+            - **Android:** Open in Chrome/Edge, tap **⋮ (Menu)** ➔ **'Install app'** or **'Add to Home screen'**.
+            - **Windows:** Click the **Install** icon (⊞) in the browser address bar.
+            - Launches directly in full-screen standalone mode without browser toolbars!
+            """
+        )
 
     with st.expander("🛠️ Environment & Diagnostics"):
         diag = BrowserExecutor.get_diagnostics(config)
