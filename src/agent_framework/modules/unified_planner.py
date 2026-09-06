@@ -391,9 +391,9 @@ Focus on alternative approaches. Do NOT repeat failed actions."""
 
         if any(k in task_lower for k in ("youtube", "video", "play", "music", "song")):
             query = task
-            for word in ("play", "the", "in youtube", "on youtube", "video", "latest", "and put sound and volume to max", "and put volume to max"):
+            for word in ("play", "the", "in youtube", "on youtube", "video", "latest", "and put sound and volume to max", "and put volume to max", "song"):
                 query = re.sub(rf"\b{re.escape(word)}\b", "", query, flags=re.IGNORECASE)
-            query = query.strip() or task
+            query = " ".join(query.split()).strip() or task
 
             return ExecutionPlan(
                 task_type="media_playback",

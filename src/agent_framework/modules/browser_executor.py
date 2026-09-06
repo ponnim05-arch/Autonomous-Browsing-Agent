@@ -256,14 +256,8 @@ class BrowserExecutor:
                     self._browser = shared_b
                     self._context = shared_ctx
 
-                    # Ensure we have an active, open page
-                    page = BrowserExecutor._shared_page
-                    if not page or page.is_closed():
-                        pages = self._context.pages
-                        if pages and not pages[-1].is_closed():
-                            page = pages[-1]
-                        else:
-                            page = await self._context.new_page()
+                    # Always open a brand new tab in the same browser window for this task
+                    page = await self._context.new_page()
 
                     self._page = page
                     BrowserExecutor._shared_page = page
@@ -271,11 +265,12 @@ class BrowserExecutor:
                         await self._page.bring_to_front()
                     except Exception:
                         pass
+                    self._activate_os_window()
 
                     self._is_started = True
                     self._reused_shared_session = True
-                    self._emit_status("browser_started", f"✅ Reused existing browser window (mode={browser_mode})")
-                    logger.info("[M5] Successfully attached to existing browser window session.")
+                    self._emit_status("browser_started", f"📑 Opened new tab in browser window (mode={browser_mode})")
+                    logger.info("[M5] Successfully opened new tab in existing browser window session.")
                     return
             except Exception as e:
                 logger.warning(f"[M5] Could not attach to shared browser: {e}. Launching fresh instance...")
@@ -417,6 +412,11 @@ class BrowserExecutor:
             pass
 
         self._page = await self._context.new_page()
+        try:
+            await self._page.bring_to_front()
+        except Exception:
+            pass
+        self._activate_os_window()
 
     async def _launch_browser_resiliently(self, b_type: str, launch_kwargs: dict):
         """
@@ -684,6 +684,12 @@ class BrowserExecutor:
             dict with keys: url, title, accessibility_tree, screenshot_path, duration_ms, action_success
         """
         await self._ensure_healthy()
+        if not self.config.headless and self._page and not self._page.is_closed():
+            try:
+                await self._page.bring_to_front()
+            except Exception:
+                pass
+            self._activate_os_window()
 
         # Safety check: normalize and block forbidden purchase URLs
         if action.action == "navigate" and action.value:
@@ -852,29 +858,46 @@ class BrowserExecutor:
             is_volume = any(k in sel_lower for k in ("volume", "sound", "unmute", "max_volume", "volume_max"))
             is_play = any(k in sel_lower for k in ("play", "video_player", "play_button"))
 
-            # Volume & Sound handling: directly maximize volume via HTML5 video element
+            # Volume & Sound handling: directly maximize volume via HTML5 video element & YouTube player API
             if is_volume:
+                await self._update_in_page_hud("Setting volume to maximum...", status_type="playing")
                 try:
                     await page.evaluate("""
                         () => {
+                            const p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                            if (p && typeof p.unMute === 'function') {
+                                try { p.unMute(); } catch(e) {}
+                                try { p.setVolume(100); } catch(e) {}
+                                try { p.playVideo(); } catch(e) {}
+                            }
                             const v = document.querySelector('video');
                             if (v) {
                                 v.muted = false;
                                 v.volume = 1.0;
+                                if (v.paused) v.play();
                             }
                         }
                     """)
                 except Exception:
                     pass
 
-            # Video play handling: play HTML5 video element
+            # Video play handling: play HTML5 video element & YouTube player API
             if is_play:
+                await self._update_in_page_hud("Playing video with sound...", status_type="playing")
                 try:
                     await page.evaluate("""
                         () => {
+                            const p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                            if (p && typeof p.playVideo === 'function') {
+                                try { p.unMute(); } catch(e) {}
+                                try { p.setVolume(100); } catch(e) {}
+                                try { p.playVideo(); } catch(e) {}
+                            }
                             const v = document.querySelector('video');
-                            if (v && v.paused) {
-                                v.play();
+                            if (v) {
+                                v.muted = false;
+                                v.volume = 1.0;
+                                if (v.paused) v.play();
                             }
                         }
                     """)
@@ -896,6 +919,9 @@ class BrowserExecutor:
 
             el = await self._resolve_element(action.selector, timeout)
             if el:
+                await self._update_in_page_hud(f"Selecting: {action.selector or 'element'}...", status_type="clicking")
+                await self._highlight_element(el)
+                await asyncio.sleep(0.5)
                 try:
                     await self._click_resiliently(el, timeout=timeout, force=(is_volume or is_play))
                 except Exception as click_err:
@@ -906,8 +932,24 @@ class BrowserExecutor:
 
                 # If we clicked a video or play button, ensure playback started
                 if any(k in sel_lower for k in ("video", "play")):
+                    await self._update_in_page_hud("Video is playing with sound...", status_type="playing")
                     try:
-                        await page.evaluate("() => { const v = document.querySelector('video'); if (v && v.paused) v.play(); }")
+                        await page.evaluate("""
+                            () => {
+                                const p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                                if (p && typeof p.playVideo === 'function') {
+                                    try { p.unMute(); } catch(e) {}
+                                    try { p.setVolume(100); } catch(e) {}
+                                    try { p.playVideo(); } catch(e) {}
+                                }
+                                const v = document.querySelector('video');
+                                if (v) {
+                                    v.muted = false;
+                                    v.volume = 1.0;
+                                    if (v.paused) v.play();
+                                }
+                            }
+                        """)
                     except Exception:
                         pass
                 return
@@ -937,12 +979,29 @@ class BrowserExecutor:
                 )
 
         elif act in ("type", "fill"):
+            val = action.value or ""
+            await self._update_in_page_hud(f"Typing: '{val}'...", status_type="typing")
             el = await self._resolve_element(action.selector, timeout)
             if el:
-                await el.fill(action.value or "", timeout=timeout)
+                await self._highlight_element(el)
+                try:
+                    await el.scroll_into_view_if_needed(timeout=1000)
+                except Exception:
+                    pass
+                try:
+                    await el.click(timeout=1000)
+                except Exception:
+                    pass
+                try:
+                    await el.fill("")
+                    await el.press_sequentially(val, delay=45)
+                except Exception:
+                    await el.fill(val, timeout=timeout)
+                await asyncio.sleep(0.4)
                 # Auto-press Enter on search fields / queries to trigger instant website search
                 if act == "type" or any(k in sel_lower for k in ("search", "query", "box", "input", "find")):
                     try:
+                        await self._update_in_page_hud(f"Submitted search: '{val}'", status_type="typing")
                         await el.press("Enter")
                     except Exception:
                         pass
@@ -957,6 +1016,7 @@ class BrowserExecutor:
                 raise ValueError("Navigate action requires a valid URL value.")
             if not url.startswith("http://") and not url.startswith("https://") and not url.startswith("about:"):
                 url = "https://" + url
+            await self._update_in_page_hud(f"Navigating to {url}...", status_type="navigating")
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=min(self.config.page_load_timeout_ms, 20000))
             except Exception as goto_err:
@@ -970,6 +1030,8 @@ class BrowserExecutor:
                         logger.info(f"[M5] Target host '{target_host}' reached despite timeout warning.")
                     else:
                         raise e2
+            await self._update_in_page_hud(f"Opened: {page.url or url}", status_type="navigating")
+            await asyncio.sleep(0.6)
 
         elif act == "scroll":
             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
@@ -2125,3 +2187,136 @@ class BrowserExecutor:
     def clear_selector_cache(self) -> None:
         """Clear the selector cache (e.g. when navigating to a new site)."""
         self._selector_cache.clear()
+
+    def _activate_os_window(self) -> None:
+        """Bring the browser window to the foreground on Windows OS."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            found_hwnds = []
+
+            def enum_windows_callback(hwnd, extra):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length > 0:
+                    class_buff = ctypes.create_unicode_buffer(256)
+                    user32.GetClassNameW(hwnd, class_buff, 256)
+                    class_name = class_buff.value
+                    if "Chrome_WidgetWin_1" in class_name:
+                        found_hwnds.append(hwnd)
+                return True
+
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            user32.EnumWindows(WNDENUMPROC(enum_windows_callback), 0)
+
+            if found_hwnds:
+                target_hwnd = found_hwnds[-1]
+                user32.ShowWindowAsync(target_hwnd, 3)  # SW_MAXIMIZE
+                user32.SetForegroundWindow(target_hwnd)
+                logger.debug(f"[M5] Brought browser window HWND {target_hwnd} to foreground.")
+        except Exception as e:
+            logger.debug(f"[M5] Could not bring browser window to front: {e}")
+
+    async def _update_in_page_hud(self, message: str, status_type: str = "info") -> None:
+        """Inject or update a sleek in-page floating Agent HUD banner."""
+        page = self._page
+        if not page or page.is_closed():
+            return
+        safe_msg = message.replace('"', '\\"').replace("'", "\\'")
+        hud_script = f"""
+        (() => {{
+            let hud = document.getElementById('agent-live-hud');
+            if (!hud) {{
+                hud = document.createElement('div');
+                hud.id = 'agent-live-hud';
+                hud.style.cssText = `
+                    position: fixed;
+                    top: 16px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    z-index: 2147483647;
+                    background: rgba(15, 23, 42, 0.88);
+                    backdrop-filter: blur(12px);
+                    -webkit-backdrop-filter: blur(12px);
+                    color: #ffffff;
+                    padding: 10px 24px;
+                    border-radius: 9999px;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.5), 0 0 15px rgba(59, 130, 246, 0.4);
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                    font-size: 14px;
+                    font-weight: 500;
+                    letter-spacing: 0.2px;
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                    pointer-events: none;
+                    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+                `;
+                document.body.appendChild(hud);
+            }}
+            let icon = '🤖';
+            if ('{status_type}' === 'success') icon = '✨';
+            else if ('{status_type}' === 'typing') icon = '⌨️';
+            else if ('{status_type}' === 'clicking') icon = '🖱️';
+            else if ('{status_type}' === 'navigating') icon = '🌐';
+            else if ('{status_type}' === 'playing') icon = '🎵';
+
+            hud.innerHTML = `<span style="font-size: 16px; filter: drop-shadow(0 0 4px rgba(255,255,255,0.5));">${{icon}}</span> <span style="color: #60a5fa; font-weight: 600;">Personal Assistant Agent</span> <span style="color: rgba(255,255,255,0.4);">|</span> <span>{safe_msg}</span>`;
+        }})();
+        """
+        try:
+            await page.evaluate(hud_script)
+        except Exception:
+            pass
+
+    async def _highlight_element(self, el: Any) -> None:
+        """Visually highlight an element with a glowing outline before interaction."""
+        try:
+            await el.evaluate("""e => {
+                const prevTransition = e.style.transition;
+                const prevOutline = e.style.outline;
+                const prevBoxShadow = e.style.boxShadow;
+                e.style.transition = 'all 0.25s ease';
+                e.style.outline = '3px solid #3b82f6';
+                e.style.boxShadow = '0 0 20px rgba(59, 130, 246, 0.9)';
+                setTimeout(() => {
+                    e.style.outline = prevOutline;
+                    e.style.boxShadow = prevBoxShadow;
+                    e.style.transition = prevTransition;
+                }, 900);
+            }""")
+        except Exception:
+            pass
+
+    async def yield_control_to_user(self) -> None:
+        """
+        Smoothly unhook automation and yield full manual control to the user.
+        Leaves the tab open, active, in front, and removes HUD overlays.
+        """
+        page = self._page
+        if page and not page.is_closed():
+            self._emit_status("handover", "✨ Task Complete — Handing over manual control to user")
+            try:
+                await self._update_in_page_hud("Task Complete! You now have full manual control.", status_type="success")
+                await page.bring_to_front()
+                self._activate_os_window()
+                await asyncio.sleep(1.8)
+                # Remove HUD completely
+                await page.evaluate("""() => {
+                    const hud = document.getElementById('agent-live-hud');
+                    if (hud) {
+                        hud.style.opacity = '0';
+                        hud.style.transform = 'translate(-50%, -20px)';
+                        setTimeout(() => hud.remove(), 400);
+                    }
+                }""")
+                # Focus the page body
+                await page.evaluate("() => document.body.focus()")
+            except Exception as e:
+                logger.debug(f"[M5] Handover notification error: {e}")
