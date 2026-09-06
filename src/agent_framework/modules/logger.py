@@ -261,8 +261,15 @@ class ExperimentLogger:
 
         action_json = action.model_dump_json() if action else None
         page_json = page_state.model_dump_json() if page_state else None
-        v_status = verification.status if verification else None
-        v_reason = verification.reason if verification else None
+        if isinstance(verification, dict):
+            v_status = verification.get("status")
+            v_reason = verification.get("reason")
+        elif verification is not None:
+            v_status = getattr(verification, "status", None)
+            v_reason = getattr(verification, "reason", None)
+        else:
+            v_status = None
+            v_reason = None
 
         # Local SQLite
         if aiosqlite and self.config.storage_backend in ("sqlite", "dual"):
