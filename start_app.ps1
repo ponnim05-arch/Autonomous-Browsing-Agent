@@ -9,7 +9,7 @@ $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # 1. Start FastAPI Backend in new window
 Write-Host "`n[1/2] Starting FastAPI Backend on http://127.0.0.1:8000..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ROOT'; .\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --reload"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ROOT\backend'; ..\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --reload"
 
 # 2. Wait 2 seconds for backend to initialize
 Start-Sleep -Seconds 2

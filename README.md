@@ -68,8 +68,8 @@ cd Auto
 python -m venv venv
 venv\Scripts\activate  # On Linux/macOS: source venv/bin/activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install backend dependencies
+pip install -r backend/requirements.txt
 
 # Install Playwright browser binaries
 playwright install chromium
@@ -126,12 +126,12 @@ The Python agent (Playwright + LLM clients) is far too heavy for a single server
                   │
                   ▼
         ┌──────────────────┐
-        │  Vercel Frontend │   React + Vite static site (vercel.json)
+        │  Vercel Frontend │   React + Vite static site (vercel.json / frontend/)
         └─────────┬────────┘
                   │ REST + WebSocket (VITE_API_BASE_URL)
                   ▼
         ┌──────────────────┐
-        │  Python Backend  │   FastAPI + Playwright (render.yaml)
+        │  Python Backend  │   FastAPI + Playwright (render.yaml / backend/)
         │  Render / Railwy │
         └─────────┬────────┘
                   │
@@ -146,7 +146,7 @@ The Python agent (Playwright + LLM clients) is far too heavy for a single server
 2. Set the environment variable `VITE_API_BASE_URL` to your backend URL (e.g. `https://browser-agent-api.onrender.com`). Leave it unset for local dev (the Vite proxy handles it).
 
 ### Deploy the backend on Render (or Railway / Cloud Run)
-1. Create a Render **Blueprint** from `render.yaml` (or a Web Service running `bash backend/start.sh`).
+1. Create a Render **Blueprint** from `render.yaml` (or a Web Service running `bash start.sh` with Root Directory set to `backend`).
 2. Set `NVIDIA_API_KEY` (or your chosen provider key) in the Render dashboard.
 3. After the first deploy, set `CORS_ORIGINS=https://<your-app>.vercel.app` on Render and redeploy.
 
@@ -158,10 +158,22 @@ The startup script installs headless Chromium (`playwright install chromium --wi
 
 ## 💻 Running the Application
 
-### Launch the Streamlit Dashboard (Recommended)
+### 1. Launch FastAPI Backend + React UI
+- Windows: Run `start_app.bat` or `.\start_app.ps1`
+- Or manually:
+  ```bash
+  # Terminal 1: Backend
+  cd backend
+  uvicorn server:app --port 8000 --reload
 
+  # Terminal 2: Frontend
+  cd frontend
+  npm run dev
+  ```
+
+### 2. Launch the Streamlit Dashboard
 ```bash
-streamlit run ui/app.py
+streamlit run backend/ui/app.py
 ```
 
 The app provides 4 views:
@@ -174,9 +186,10 @@ The app provides 4 views:
 
 ## 🧪 Running the Test Suite
 
-Run all unit tests across all modules (100% mocked, no API keys needed):
+Run all unit tests across all backend modules:
 
 ```bash
+cd backend
 pytest
 ```
 

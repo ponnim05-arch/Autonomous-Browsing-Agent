@@ -15,14 +15,16 @@ from dotenv import load_dotenv
 
 DEFAULT_NVIDIA_API_KEY: str = "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"
 
-ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+ENV_PATH_BACKEND = Path(__file__).resolve().parents[2] / ".env"
+ENV_PATH_ROOT = Path(__file__).resolve().parents[3] / ".env"
 
 
 def _reload_env() -> None:
-    if ENV_PATH.exists():
-        load_dotenv(dotenv_path=ENV_PATH, override=False)
-    else:
-        load_dotenv(override=False)
+    if ENV_PATH_BACKEND.exists():
+        load_dotenv(dotenv_path=ENV_PATH_BACKEND, override=False)
+    if ENV_PATH_ROOT.exists():
+        load_dotenv(dotenv_path=ENV_PATH_ROOT, override=False)
+    load_dotenv(override=False)
 
 
 _reload_env()

@@ -5,7 +5,7 @@ echo   Starting Autonomous Fast Browser Agent (React UI)
 echo ====================================================
 
 echo [1/2] Launching FastAPI Backend on http://127.0.0.1:8000...
-start "FastAPI Backend" cmd /k ".\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --reload"
+start "FastAPI Backend" cmd /k "cd /d %~dp0backend && ..\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --reload"
 
 timeout /t 2 /nobreak >nul
 

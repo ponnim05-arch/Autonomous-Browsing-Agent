@@ -42,9 +42,15 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 !data/.gitkeep
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+!backend/data/.gitkeep
 
 logs/runs/*
 !logs/runs/.gitkeep
+backend/logs/runs/*
+!backend/logs/runs/.gitkeep
 *.log
 
 # IDE & OS

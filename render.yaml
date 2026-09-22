@@ -8,11 +8,11 @@ services:
     runtime: python
     plan: starter # needs ~512MB+ RAM for headless Chromium; use "standard" for smoother runs
     region: oregon
-    branch: main
+    rootDir: backend
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: bash backend/start.sh
+    startCommand: bash start.sh
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:

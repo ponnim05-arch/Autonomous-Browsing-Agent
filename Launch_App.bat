@@ -35,6 +35,6 @@ echo.
 echo [3/3] Launching AutoAgent...
 start "" "http://localhost:8501"
 
-"%PYTHON_EXE%" -m streamlit run ui/app.py --server.port=8501 --server.address=0.0.0.0
+"%PYTHON_EXE%" -m streamlit run backend/ui/app.py --server.port=8501 --server.address=0.0.0.0
 
 pause
