@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { apiUrl } from "@/lib/api";
 import { Play, ListTree, Sparkles, Shield, Compass, Cpu, Layers, CheckCircle2, ArrowRight, Eye, EyeOff, Radio } from "lucide-react";
 import { HandwritingText } from "@/components/ui/handwriting-text";
 import { Button } from "@/components/ui/button";
@@ -75,7 +76,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
     setIsPlanning(true);
     setPlanError(null);
     try {
-      const res = await fetch("/api/plan", {
+      const res = await fetch(apiUrl("/api/plan"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: jsonBody({ goal, model, strategy }),

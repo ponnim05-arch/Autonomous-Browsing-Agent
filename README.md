@@ -117,6 +117,45 @@ CDP_ENDPOINT=http://127.0.0.1:9222
 
 ---
 
+## ☁️ Deployment Architecture (Split Frontend / Backend)
+
+The Python agent (Playwright + LLM clients) is far too heavy for a single serverless function — bundling it whole exceeds Vercel's 500 MB function limit. The project therefore deploys as **two services**:
+
+```
+                 User
+                  │
+                  ▼
+        ┌──────────────────┐
+        │  Vercel Frontend │   React + Vite static site (vercel.json)
+        └─────────┬────────┘
+                  │ REST + WebSocket (VITE_API_BASE_URL)
+                  ▼
+        ┌──────────────────┐
+        │  Python Backend  │   FastAPI + Playwright (render.yaml)
+        │  Render / Railwy │
+        └─────────┬────────┘
+                  │
+          ┌───────┴────────┐
+          ▼                ▼
+    Browser Agent       AI/LLM API
+    (headless Chromium)   (NVIDIA / Gemini / OpenAI)
+```
+
+### Deploy the frontend on Vercel
+1. Import the repo into Vercel — `vercel.json` pins it to the Vite framework so the Python code is **never bundled**.
+2. Set the environment variable `VITE_API_BASE_URL` to your backend URL (e.g. `https://browser-agent-api.onrender.com`). Leave it unset for local dev (the Vite proxy handles it).
+
+### Deploy the backend on Render (or Railway / Cloud Run)
+1. Create a Render **Blueprint** from `render.yaml` (or a Web Service running `bash backend/start.sh`).
+2. Set `NVIDIA_API_KEY` (or your chosen provider key) in the Render dashboard.
+3. After the first deploy, set `CORS_ORIGINS=https://<your-app>.vercel.app` on Render and redeploy.
+
+The startup script installs headless Chromium (`playwright install chromium --with-deps`) before launching uvicorn on `$PORT`. WebSocket live streaming (`/ws/agent/<run_id>`) works as-is on Render.
+
+> **Note:** Reducing the Vercel Python bundle or switching Python 3.12 → 3.11 does not fix the 693 MB function-size error — the fix is separating the static frontend from the heavy Python service, as above.
+
+---
+
 ## 💻 Running the Application
 
 ### Launch the Streamlit Dashboard (Recommended)

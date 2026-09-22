@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { apiUrl } from "@/lib/api";
 import { BarChart3, TrendingUp, Clock, Zap, RotateCcw, Award, Layers } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -15,7 +16,7 @@ export const DashboardView: React.FC = () => {
   const fetchMetrics = async () => {
     try {
       setLoading(true);
-      const res = await fetch("/api/metrics");
+      const res = await fetch(apiUrl("/api/metrics"));
       if (res.ok) {
         const data = await res.json();
         setMetrics(data);

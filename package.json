@@ -1,0 +1,11 @@
+{
+  "name": "autonomous-browser-agent-deploy",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Deploy root for Vercel: React frontend only. The Python browser agent runs separately (see render.yaml).",
+  "scripts": {
+    "dev": "cd frontend && npm run dev",
+    "build": "cd frontend && npm install && npm run build",
+    "preview": "cd frontend && npm run preview"
+  }
+}

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { apiUrl } from "@/lib/api";
 import {
   Globe,
   RefreshCw,
@@ -107,7 +108,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
 
   // Fetch top 10 related videos from backend
   useEffect(() => {
-    fetch("/api/related-videos")
+    fetch(apiUrl("/api/related-videos"))
       .then((res) => (res.ok ? res.json() : []))
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {

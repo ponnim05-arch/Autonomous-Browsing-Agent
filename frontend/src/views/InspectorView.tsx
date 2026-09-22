@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { apiUrl } from "@/lib/api";
 import { Search, Terminal, AlertTriangle, CheckCircle, Clock, Wrench, Shield, ChevronRight } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +17,7 @@ export const InspectorView: React.FC = () => {
 
   const fetchRuns = async () => {
     try {
-      const res = await fetch("/api/runs?limit=50");
+      const res = await fetch(apiUrl("/api/runs?limit=50"));
       if (res.ok) {
         const data = await res.json();
         setRuns(data);
@@ -33,7 +34,7 @@ export const InspectorView: React.FC = () => {
   const fetchRunDetails = async (runId: string) => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/runs/${runId}`);
+      const res = await fetch(apiUrl(`/api/runs/${runId}`));
       if (res.ok) {
         const data = await res.json();
         setRunDetails(data);

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { apiUrl, wsUrl } from "@/lib/api";
 import { Navbar } from "@/components/Navbar";
 import { HomeView } from "@/views/HomeView";
 import { AgentView } from "@/views/AgentView";
@@ -36,7 +37,7 @@ export function App() {
 
   const loadLatestRunIfIdle = async () => {
     try {
-      const res = await fetch("/api/runs?limit=1");
+      const res = await fetch(apiUrl("/api/runs?limit=1"));
       if (res.ok) {
         const runs = await res.json();
         if (runs && runs.length > 0 && !activeRunId) {
@@ -46,7 +47,7 @@ export function App() {
           setActiveStrategy(latest.strategy || "plan_then_execute");
           setAgentStatus(latest.status === "success" ? "completed" : "idle");
 
-          const detRes = await fetch(`/api/runs/${latest.run_id}`);
+          const detRes = await fetch(apiUrl(`/api/runs/${latest.run_id}`));
           if (detRes.ok) {
             const det = await detRes.json();
             if (det.final_url) setCurrentUrl(det.final_url);
@@ -71,11 +72,11 @@ export function App() {
 
   const checkHealth = async () => {
     try {
-      const res = await fetch("/api/health");
+      const res = await fetch(apiUrl("/api/health"));
       if (res.ok) {
         setBackendConnected(true);
         if (!config) {
-          const cfgRes = await fetch("/api/config");
+          const cfgRes = await fetch(apiUrl("/api/config"));
           if (cfgRes.ok) {
             const data = await cfgRes.json();
             setConfig(data);
@@ -110,7 +111,7 @@ export function App() {
     setActiveTab("agent");
 
     try {
-      const res = await fetch("/api/run", {
+      const res = await fetch(apiUrl("/api/run"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(params),
@@ -135,9 +136,7 @@ export function App() {
       wsRef.current.close();
     }
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws/agent/${runId}`;
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl(`/ws/agent/${runId}`));
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -222,7 +221,7 @@ export function App() {
   const handleStopRun = async () => {
     if (!activeRunId) return;
     try {
-      await fetch(`/api/stop/${activeRunId}`, { method: "POST" });
+      await fetch(apiUrl(`/api/stop/${activeRunId}`), { method: "POST" });
       setAgentStatus("idle");
       setLogs((prev) => [...prev, { type: "info", message: "Agent stopped by user." }]);
     } catch (e) {

@@ -62,10 +62,16 @@ app = FastAPI(
 )
 
 # CORS configuration
+# In production the Vercel-hosted frontend calls this API cross-origin, so the
+# allowed origins come from CORS_ORIGINS (comma-separated). "*" keeps local dev easy.
+_cors_origins_env = os.getenv("CORS_ORIGINS", "*").strip()
+_cors_origins = [o.strip() for o in _cors_origins_env.split(",") if o.strip()] or ["*"]
+_allow_credentials = "*" not in _cors_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )

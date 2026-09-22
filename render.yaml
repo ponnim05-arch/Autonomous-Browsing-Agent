@@ -1,0 +1,48 @@
+# Render.com Blueprint — Python FastAPI + Playwright backend
+# Deploy: Render Dashboard → New → Blueprint → select this repo.
+# The frontend deploys separately on Vercel (see vercel.json).
+
+services:
+  - type: web
+    name: browser-agent-api
+    runtime: python
+    plan: starter # needs ~512MB+ RAM for headless Chromium; use "standard" for smoother runs
+    region: oregon
+    branch: main
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: bash backend/start.sh
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: BROWSER_MODE
+        value: headless
+      - key: HEADLESS
+        value: "true"
+      - key: BROWSER_TYPE
+        value: chromium
+      - key: KEEP_BROWSER_OPEN
+        value: "false"
+      - key: NVIDIA_API_KEY
+        sync: false # set in Render dashboard (LLM provider key)
+      - key: LLM_PROVIDER
+        value: nvidia
+      - key: LLM_MODEL
+        value: meta/llama-3.2-11b-vision-instruct
+      - key: FAST_MODEL
+        value: meta/llama-3.2-11b-vision-instruct
+      - key: REASONING_MODEL
+        value: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+      - key: STORAGE_BACKEND
+        value: sqlite
+      - key: DB_PATH
+        value: data/experiments.db
+      - key: LOG_DIR
+        value: logs/runs
+      # After the first Render deploy, set this on Vercel AND Render:
+      # CORS_ORIGINS = https://<your-project>.vercel.app
+      - key: CORS_ORIGINS
+        sync: false
