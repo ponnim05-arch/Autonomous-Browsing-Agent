@@ -92,7 +92,7 @@ class AgentConfig:
         default_factory=lambda: os.getenv("HEADLESS", "false").lower() == "true"
     )
     browser_type: str = field(
-        default_factory=lambda: os.getenv("BROWSER_TYPE", "chromium")
+        default_factory=lambda: os.getenv("BROWSER_TYPE", "msedge")
     )
     browser_connection_mode: str = field(
         default_factory=lambda: os.getenv("BROWSER_CONNECTION_MODE", "playwright").lower()

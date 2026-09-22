@@ -492,7 +492,12 @@ class BrowserExecutor:
 
     async def _start_playwright(self) -> None:
         """Launch a dedicated Playwright browser instance with cascading fallbacks."""
-        b_type = (self.config.browser_type or "chromium").lower()
+        b_type = (self.config.browser_type or "").lower()
+        # Treat unknown / empty values (e.g. a stale BROWSER_TYPE env var) as
+        # "auto": the launcher will prefer installed system Edge/Chrome and only
+        # fall back to bundled Chromium if no system browser is found.
+        if b_type not in ("msedge", "edge", "chrome", "google-chrome", "firefox", "webkit"):
+            b_type = "auto"
         browser_args = [
             "--disable-blink-features=AutomationControlled",
             "--disable-background-timer-throttling",
@@ -578,10 +583,10 @@ class BrowserExecutor:
                 ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
             )
             launch_attempts.append(
-                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
+                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
             )
             launch_attempts.append(
-                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
         elif b_type in ("chrome", "google-chrome"):
             launch_attempts.append(
@@ -606,15 +611,17 @@ class BrowserExecutor:
                 ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
         else:
-            # Default: chromium
-            launch_attempts.append(
-                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
-            )
+            # Default: prefer already-installed system browsers (Edge/Chrome) so
+            # no bundled Chromium download is required. Bundled Chromium is only
+            # used as a last-resort fallback.
             launch_attempts.append(
                 ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
             )
             launch_attempts.append(
                 ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+            )
+            launch_attempts.append(
+                ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
 
         last_error = None

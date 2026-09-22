@@ -2,9 +2,10 @@
 utils/search_client.py — Search API Wrapper
 ============================================
 Unified search interface supporting SerpAPI, Google Custom Search Engine,
-and Bing Search API. Auto-selects provider based on which API key is set.
+Bing Search API, and a free DuckDuckGo fallback (no API key required).
+Auto-selects provider based on which API key is set.
 
-Priority: SerpAPI > Google CSE > Bing > Mock (for testing)
+Priority: SerpAPI > Google CSE > Bing > DuckDuckGo (free) > Mock (for testing)
 """
 
 from __future__ import annotations
@@ -20,6 +21,69 @@ from ..models import SearchResult
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 10.0  # seconds
+
+_DDG_BACKENDS = ("html", "lite", "bang")
+
+
+def _clean_ddg_url(url: str) -> str:
+    """Unwrap DuckDuckGo redirect links (//duckduckgo.com/l/?uddg=<encoded>) to real URLs."""
+    import re as _re
+    from urllib.parse import unquote, parse_qs
+
+    url = url.strip()
+    if "duckduckgo.com" in url and "uddg=" in url:
+        m = _re.search(r"[?&]uddg=([^&]+)", url)
+        if m:
+            return unquote(m.group(1))
+    # Strip leading protocol-relative '//' and decode HTML entities
+    if url.startswith("//"):
+        url = "https:" + url
+    return url.split("&amp;")[0] if "&amp;" in url else url
+
+
+def _parse_ddg_html(html: str, num: int) -> list[SearchResult]:
+    """Extract organic results from DuckDuckGo's plain-HTML result page."""
+    import re
+
+    results: list[SearchResult] = []
+    # Each result block: <a rel="nofollow" class="result-link" href="...">Title</a>
+    # followed by <a class="result-snippet">Snippet</a>
+    for m in re.finditer(
+        r'<a[^>]*class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+        r'(?:.*?<a[^>]*class="result-snippet"[^>]*>(.*?)</a>)?',
+        html,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        if len(results) >= num:
+            break
+        url = _clean_ddg_url(m.group(1))
+        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        snippet = re.sub(r"<[^>]+>", "", m.group(3) or "").strip()
+        if url and title:
+            results.append(SearchResult(title=title, url=url, snippet=snippet))
+    return results
+
+
+def _parse_ddg_lite(html: str, num: int) -> list[SearchResult]:
+    """Extract organic results from DuckDuckGo's lite HTML page."""
+    import re
+
+    results: list[SearchResult] = []
+    # Lite layout: <a rel="nofollow" href="...">Title</a> then <td class="result-snippet">
+    for m in re.finditer(
+        r'<a[^>]*rel="nofollow"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+        r'(?:.*?<td[^>]*class="result-snippet"[^>]*>(.*?)</td>)?',
+        html,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        if len(results) >= num:
+            break
+        url = _clean_ddg_url(m.group(1))
+        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        snippet = re.sub(r"<[^>]+>", "", m.group(3) or "").strip()
+        if url and title:
+            results.append(SearchResult(title=title, url=url, snippet=snippet))
+    return results
 
 
 class SearchClientError(Exception):
@@ -66,9 +130,15 @@ class SearchClient:
             try:
                 return await self._bing(query, num)
             except Exception as e:
-                logger.warning(f"[Search] Bing failed: {e}. Returning mock.")
+                logger.warning(f"[Search] Bing failed: {e}. Trying next.")
 
-        logger.warning("[Search] No search API key configured. Returning mock results.")
+        # Free fallback: DuckDuckGo HTML endpoints (no API key / extra module needed)
+        try:
+            return await self._duckduckgo(query, num)
+        except Exception as e:
+            logger.warning(f"[Search] DuckDuckGo failed: {e}. Returning mock.")
+
+        logger.warning("[Search] No search provider available. Returning mock results.")
         return self._mock_results(query, num)
 
     # ── SerpAPI ───────────────────────────────────────────────────
@@ -141,6 +211,36 @@ class SearchClient:
                 snippet=item.get("snippet", ""),
             ))
         return results
+
+    # ── DuckDuckGo (free, no API key) ────────────────────────────
+
+    async def _duckduckgo(self, query: str, num: int) -> list[SearchResult]:
+        """
+        Free web search via DuckDuckGo's HTML endpoints.
+        No API key or extra dependency required — only httpx.
+        """
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        params = {"q": query, "kl": "us-en"}
+
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, headers=headers) as client:
+            last_err: Exception | None = None
+            for backend in _DDG_BACKENDS:
+                try:
+                    resp = await client.get(f"https://html.duckduckgo.com/{backend}/", params=params)
+                    resp.raise_for_status()
+                    html = resp.text
+                    results = _parse_ddg_html(html, num) or _parse_ddg_lite(html, num)
+                    if results:
+                        logger.info(f"[Search] DuckDuckGo ({backend}) returned {len(results)} results.")
+                        return results
+                except Exception as e:
+                    last_err = e
+                    logger.warning(f"[Search] DDG backend '{backend}' failed: {e}. Trying next.")
+
+        raise SearchClientError(f"DuckDuckGo returned no usable results: {last_err}")
 
     # ── Mock (no API key) ─────────────────────────────────────────
 

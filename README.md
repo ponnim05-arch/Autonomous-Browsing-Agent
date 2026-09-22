@@ -90,12 +90,16 @@ GEMINI_API_KEY=your_gemini_api_key_here
 LLM_PROVIDER=gemini
 LLM_MODEL=gemini-2.0-flash
 
-# Optional: Search API
-SERPAPI_KEY=your_serpapi_key_here
+# Optional: Search API (if none set, free DuckDuckGo search is used — no key needed)
+SERPAPI_KEY=
+GOOGLE_CSE_KEY=
+GOOGLE_CSE_CX=
+BING_SEARCH_KEY=
 
 # Browser Settings
-# Type: chromium | msedge | chrome | firefox | webkit
-BROWSER_TYPE=chromium
+# Type: msedge (default, pre-installed on Windows) | chrome | chromium | firefox | webkit
+# Uses your installed browser — NO bundled Chromium download required.
+BROWSER_TYPE=msedge
 HEADLESS=false
 
 # Connection Mode: playwright (dedicated clean browser) | cdp (existing Chrome via remote debugging)
