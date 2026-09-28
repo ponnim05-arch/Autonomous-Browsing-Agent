@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { apiUrl } from "@/lib/api";
-import { Search, Terminal, AlertTriangle, CheckCircle, Clock, Wrench, Shield, ChevronRight } from "lucide-react";
+import { Search, Terminal, AlertTriangle, CheckCircle, Clock, Wrench, Shield, ChevronRight, Trash2, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,8 @@ export const InspectorView: React.FC = () => {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runDetails, setRunDetails] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [deletingRunId, setDeletingRunId] = useState<string | null>(null);
+  const [clearingAll, setClearingAll] = useState(false);
 
   useEffect(() => {
     fetchRuns();
@@ -51,6 +53,49 @@ export const InspectorView: React.FC = () => {
     fetchRunDetails(runId);
   };
 
+  const handleDeleteRun = async (runId: string) => {
+    if (!window.confirm(`Delete run ${runId} and all of its recorded steps, repairs and screenshots?`)) return;
+    setDeletingRunId(runId);
+    try {
+      const res = await fetch(apiUrl(`/api/runs/${runId}`), { method: "DELETE" });
+      if (res.ok) {
+        if (selectedRunId === runId) {
+          setSelectedRunId(null);
+          setRunDetails(null);
+        }
+        await fetchRuns();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || "Failed to delete run");
+      }
+    } catch (e) {
+      console.error("Failed to delete run", e);
+      alert("Failed to delete run");
+    } finally {
+      setDeletingRunId(null);
+    }
+  };
+
+  const handleClearAllRuns = async () => {
+    if (!window.confirm("Clear ALL recorded runs? This permanently deletes every run, step, repair and screenshot from the database.")) return;
+    setClearingAll(true);
+    try {
+      const res = await fetch(apiUrl("/api/runs"), { method: "DELETE" });
+      if (res.ok) {
+        setSelectedRunId(null);
+        setRunDetails(null);
+        await fetchRuns();
+      } else {
+        alert("Failed to clear recorded runs");
+      }
+    } catch (e) {
+      console.error("Failed to clear runs", e);
+      alert("Failed to clear recorded runs");
+    } finally {
+      setClearingAll(false);
+    }
+  };
+
   const summary = runDetails?.summary || {};
   const steps = runDetails?.steps || [];
   const repairs = runDetails?.repairs || [];
@@ -74,9 +119,24 @@ export const InspectorView: React.FC = () => {
             <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
               Recorded Runs ({runs.length})
             </span>
-            <Button variant="ghost" size="sm" onClick={fetchRuns} className="text-xs text-emerald-400">
-              Refresh
-            </Button>
+            <div className="flex items-center gap-1">
+              {runs.length > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearAllRuns}
+                  disabled={clearingAll}
+                  title="Delete all recorded runs"
+                  className="text-xs text-red-400 hover:text-red-300 hover:bg-red-500/10 gap-1"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>{clearingAll ? "Clearing..." : "Clear All"}</span>
+                </Button>
+              )}
+              <Button variant="ghost" size="sm" onClick={fetchRuns} className="text-xs text-emerald-400">
+                Refresh
+              </Button>
+            </div>
           </div>
 
           <div className="space-y-2 max-h-[640px] overflow-y-auto pr-1">
@@ -96,12 +156,29 @@ export const InspectorView: React.FC = () => {
                   >
                     <div className="flex items-center justify-between">
                       <span className="font-mono font-bold text-white">{r.run_id}</span>
-                      <Badge
-                        variant={isSuccess ? "emerald" : r.status === "failed" ? "destructive" : "secondary"}
-                        className="text-[10px]"
-                      >
-                        {r.status}
-                      </Badge>
+                      <div className="flex items-center gap-1.5">
+                        <Badge
+                          variant={isSuccess ? "emerald" : r.status === "failed" ? "destructive" : "secondary"}
+                          className="text-[10px]"
+                        >
+                          {r.status}
+                        </Badge>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteRun(r.run_id);
+                          }}
+                          disabled={deletingRunId === r.run_id}
+                          title="Delete this run"
+                          className="rounded p-1 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition disabled:opacity-40"
+                        >
+                          {deletingRunId === r.run_id ? (
+                            <RefreshCw className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-3 w-3" />
+                          )}
+                        </button>
+                      </div>
                     </div>
                     <p className="mt-1 font-medium text-zinc-300 line-clamp-1">{r.task_goal}</p>
                     <div className="mt-2 flex items-center justify-between text-[10px] text-zinc-500 font-mono">

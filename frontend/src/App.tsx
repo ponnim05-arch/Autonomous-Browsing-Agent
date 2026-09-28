@@ -27,48 +27,42 @@ export function App() {
 
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Check backend health & fetch config
+  // When the app window closes/reloads, tell the backend to stop all agents,
+  // cancel active tasks and close browser sessions. sendBeacon survives page
+  // unload; fetch keepalive is the fallback (e.g. Firefox tab close).
+  useEffect(() => {
+    const shutdownBeacon = () => {
+      try {
+        const url = apiUrl("/api/shutdown");
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url, new Blob(["{}"], { type: "application/json" }));
+        } else {
+          fetch(url, { method: "POST", keepalive: true }).catch(() => {});
+        }
+      } catch {
+        /* best-effort */
+      }
+    };
+    window.addEventListener("pagehide", shutdownBeacon);
+    return () => {
+      window.removeEventListener("pagehide", shutdownBeacon);
+      shutdownBeacon();
+    };
+  }, []);
+
+  // Check backend health & fetch config. The app ALWAYS opens as a fresh
+  // session: no previous run is restored, no task auto-executes. Stale runs
+  // are cancelled by the backend's startup cleanup.
   useEffect(() => {
     checkHealth();
-    loadLatestRunIfIdle();
+    try {
+      sessionStorage.clear();
+    } catch {
+      /* storage unavailable */
+    }
     const interval = setInterval(checkHealth, 10000);
     return () => clearInterval(interval);
   }, []);
-
-  const loadLatestRunIfIdle = async () => {
-    try {
-      const res = await fetch(apiUrl("/api/runs?limit=1"));
-      if (res.ok) {
-        const runs = await res.json();
-        if (runs && runs.length > 0 && !activeRunId) {
-          const latest = runs[0];
-          setActiveRunId(latest.run_id);
-          setActiveGoal(latest.task_goal);
-          setActiveStrategy(latest.strategy || "plan_then_execute");
-          setAgentStatus(latest.status === "success" ? "completed" : "idle");
-
-          const detRes = await fetch(apiUrl(`/api/runs/${latest.run_id}`));
-          if (detRes.ok) {
-            const det = await detRes.json();
-            if (det.final_url) setCurrentUrl(det.final_url);
-            if (det.final_title) setPageTitle(det.final_title);
-            if (det.latest_screenshot_base64) {
-              setCurrentScreenshot(det.latest_screenshot_base64);
-            } else if (det.latest_screenshot) {
-              setCurrentScreenshot(det.latest_screenshot);
-            }
-            if (det.steps && det.steps.length > 0) {
-              setSteps(det.steps);
-              setTotalSteps(det.steps.length);
-              setCurrentStepIndex(det.steps.length - 1);
-            }
-          }
-        }
-      }
-    } catch (err) {
-      console.debug("Could not pre-load latest run:", err);
-    }
-  };
 
   const checkHealth = async () => {
     try {
@@ -185,6 +179,12 @@ export function App() {
         } else if (type === "browser_event") {
           setLogs((prev) => [...prev, { type: "info", message: data.message }]);
           if (data.url) setCurrentUrl(data.url);
+        } else if (type === "run_cleared") {
+          resetRunState();
+          if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+          }
         } else if (type === "run_finished") {
           if (data.final_url) setCurrentUrl(data.final_url);
           if (data.final_title) setPageTitle(data.final_title);
@@ -229,6 +229,40 @@ export function App() {
     }
   };
 
+  const resetRunState = () => {
+    setActiveRunId(null);
+    setActiveGoal("");
+    setActiveStrategy("plan_then_execute");
+    setAgentStatus("idle");
+    setCurrentUrl(null);
+    setPageTitle(null);
+    setCurrentScreenshot(null);
+    setLogs([]);
+    setSteps([]);
+    setCurrentStepIndex(0);
+    setTotalSteps(0);
+    setExtractedItems([]);
+  };
+
+  const handleClearRun = async () => {
+    const runId = activeRunId;
+    resetRunState();
+    setLogs([{ type: "info", message: "Task cleared. Ready for a new task." }]);
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    if (runId) {
+      try {
+        await fetch(apiUrl(`/api/runs/${runId}/clear`), { method: "POST" });
+      } catch (e) {
+        console.debug("Could not notify backend of run clear:", e);
+      }
+    }
+    // Stay in the Agent View showing its fresh empty state
+    setActiveTab("agent");
+  };
+
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 selection:bg-emerald-500/20 selection:text-emerald-300">
       <Navbar
@@ -258,6 +292,7 @@ export function App() {
             totalSteps={totalSteps}
             extractedItems={extractedItems}
             onStopRun={handleStopRun}
+            onClearRun={handleClearRun}
             onNavigateHome={() => setActiveTab("home")}
           />
         )}

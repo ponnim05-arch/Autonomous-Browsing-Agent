@@ -22,6 +22,7 @@ import {
   Volume2,
   Layers,
   ArrowUpRight,
+  Eraser,
   X
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -42,6 +43,7 @@ interface AgentViewProps {
   totalSteps: number;
   extractedItems: any[];
   onStopRun: () => void;
+  onClearRun: () => void;
   onNavigateHome: () => void;
 }
 
@@ -71,6 +73,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
   totalSteps,
   extractedItems,
   onStopRun,
+  onClearRun,
   onNavigateHome,
 }) => {
   const [viewMode, setViewMode] = useState<"video" | "snapshot">("video");
@@ -197,6 +200,19 @@ export const AgentView: React.FC<AgentViewProps> = ({
             <Button variant="destructive" size="sm" onClick={onStopRun} className="gap-1.5">
               <Square className="h-3.5 w-3.5 fill-current" />
               <span>Stop Agent</span>
+            </Button>
+          )}
+
+          {status !== "idle" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClearRun}
+              title="Clear this task and reset the agent view"
+              className="gap-1.5 text-zinc-400 hover:text-white hover:bg-zinc-800 border border-white/10"
+            >
+              <Eraser className="h-3.5 w-3.5" />
+              <span>Clear</span>
             </Button>
           )}
 

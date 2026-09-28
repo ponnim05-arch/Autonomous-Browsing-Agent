@@ -14,8 +14,10 @@ import json
 import logging
 import math
 import os
+import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -95,6 +97,7 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, List[WebSocket]] = {}
         self.run_cancel_events: Dict[str, asyncio.Event] = {}
+        self.run_sessions: Dict[str, Optional[str]] = {}
 
     async def connect(self, run_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -123,6 +126,113 @@ class ConnectionManager:
 
 
 ws_manager = ConnectionManager()
+
+
+# ── Session Lifecycle ─────────────────────────────────────────────────────────
+# Every backend process owns a unique session id. A run started in a previous
+# session is never resumable: startup cleanup marks stale RUNNING/PENDING rows
+# as CANCELLED, and the frontend always opens with an empty Agent View.
+
+CURRENT_SESSION: Dict[str, Any] = {}
+
+
+def _new_session_id() -> str:
+    return f"session_{uuid.uuid4().hex[:12].upper()}"
+
+
+def _begin_session() -> str:
+    CURRENT_SESSION["id"] = _new_session_id()
+    CURRENT_SESSION["started_at"] = time.time()
+    logger.info(f"[Session] New backend session: {CURRENT_SESSION['id']}")
+    return CURRENT_SESSION["id"]
+
+
+async def _mark_stale_runs_cancelled() -> int:
+    """Mark RUNNING/PENDING runs left over from previous sessions as CANCELLED
+    so no restart, reload or reconnect can ever pick them up again."""
+    total = 0
+    for db_file in _db_file_candidates():
+        if not db_file.exists():
+            continue
+        try:
+            import aiosqlite
+
+            async with aiosqlite.connect(db_file) as db:
+                cur = await db.execute(
+                    "UPDATE experiment_runs SET status='cancelled', completed_at=datetime('now') "
+                    "WHERE status IN ('running', 'pending')"
+                )
+                await db.commit()
+                total += max(cur.rowcount or 0, 0)
+        except Exception as e:
+            logger.warning(f"[Session] Could not cancel stale runs in {db_file}: {e}")
+    return total
+
+
+async def _stop_all_runs(reason: str) -> int:
+    """Signal every active run to cancel and mark them cancelled in the DB."""
+    stopped = 0
+    for rid, evt in list(ws_manager.run_cancel_events.items()):
+        evt.set()
+        stopped += 1
+        await ws_manager.broadcast(rid, "status", {"message": reason})
+    if stopped:
+        try:
+            await _mark_stale_runs_cancelled()
+        except Exception as e:
+            logger.warning(f"[Session] Could not mark stopped runs cancelled: {e}")
+    return stopped
+
+
+async def _close_browser_sessions() -> None:
+    """Terminate any browser automation session owned by this process."""
+    try:
+        await BrowserExecutor.close_shared_session()
+    except Exception as e:
+        logger.debug(f"[Session] Shared browser close failed: {e}")
+
+
+@app.on_event("startup")
+async def _session_startup_cleanup():
+    """Startup safety check: fresh session, stale runs cancelled, no orphan browsers."""
+    _begin_session()
+    cancelled = await _mark_stale_runs_cancelled()
+    if cancelled:
+        logger.info(f"[Session] Marked {cancelled} stale run(s) as cancelled from previous sessions.")
+    try:
+        BrowserExecutor._kill_zombie_playwright_browsers()
+    except Exception as e:
+        logger.debug(f"[Session] Zombie browser cleanup skipped: {e}")
+    await _close_browser_sessions()
+
+
+@app.on_event("shutdown")
+async def _session_shutdown_cleanup():
+    """Process shutdown: cancel all runs, close browsers, end the session."""
+    logger.info(f"[Session] Shutting down session {CURRENT_SESSION.get('id')}")
+    await _stop_all_runs("Backend session ended — agent stopped.")
+    await _close_browser_sessions()
+    CURRENT_SESSION["id"] = None
+
+
+@app.get("/api/session")
+async def get_session():
+    """Current backend session info — the frontend uses this to detect restarts."""
+    return {
+        "session_id": CURRENT_SESSION.get("id"),
+        "started_at": CURRENT_SESSION.get("started_at"),
+        "active_runs": list(ws_manager.run_cancel_events.keys()),
+    }
+
+
+@app.post("/api/shutdown")
+async def client_shutdown_beacon():
+    """The frontend sends this beacon when the app window closes/reloads:
+    stop all agents, cancel active tasks and close browser sessions.
+    Idempotent — safe to receive multiple times."""
+    stopped = await _stop_all_runs("Application closed — agent stopped.")
+    await _close_browser_sessions()
+    return {"status": "ok", "stopped_runs": stopped}
 
 
 # ── Request / Response Schemas ────────────────────────────────────────────────
@@ -255,9 +365,10 @@ async def start_run(req: RunRequest):
     exp_logger = ExperimentLogger(cfg)
     run_id = await exp_logger.start_run(req.goal, req.strategy)
 
-    # Initialize cancel event
+    # Initialize cancel event and bind run to the current session
     cancel_event = asyncio.Event()
     ws_manager.run_cancel_events[run_id] = cancel_event
+    ws_manager.run_sessions[run_id] = CURRENT_SESSION.get("id")
 
     # Launch execution background task
     asyncio.create_task(
@@ -382,6 +493,169 @@ async def get_latest_screenshot(run_id: str):
         "screenshot_base64": b64,
         "step": latest.stem,
     }
+
+
+# ── Run Deletion / Clearing Helpers ───────────────────────────────────────────
+
+def _db_file_candidates() -> List[Path]:
+    """Possible locations of the SQLite experiments DB (CWD-relative or backend-relative)."""
+    rel = default_config.db_path
+    candidates = [Path(rel), ROOT_DIR / rel]
+    seen, unique = set(), []
+    for c in candidates:
+        rp = c.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            unique.append(c)
+    return unique
+
+
+def _run_artifact_dirs() -> List[Path]:
+    """Possible base dirs holding per-run artifacts (trace.jsonl, CSVs, screenshots)."""
+    rel = default_config.log_dir
+    candidates = [Path(rel), ROOT_DIR / rel, RUNS_DIR]
+    seen, unique = set(), []
+    for c in candidates:
+        rp = c.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            unique.append(c)
+    return unique
+
+
+def _delete_run_artifacts(run_id: str) -> bool:
+    """Remove on-disk artifacts (screenshots, JSONL traces, CSV exports) for a run."""
+    removed = False
+    for base in _run_artifact_dirs():
+        run_dir = base / run_id
+        if run_dir.is_dir():
+            shutil.rmtree(run_dir, ignore_errors=True)
+            removed = True
+    return removed
+
+
+async def _delete_run_rows(db_file: Path, run_id: str) -> int:
+    """Delete all DB rows for a run. Returns the number of rows removed."""
+    deleted = 0
+    try:
+        import aiosqlite
+
+        async with aiosqlite.connect(db_file) as db:
+            for table in ("action_steps", "prompt_repairs", "experiment_runs"):
+                cur = await db.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
+                deleted += max(cur.rowcount or 0, 0)
+            await db.commit()
+    except ImportError:
+        import sqlite3
+
+        def _sync() -> int:
+            n = 0
+            with sqlite3.connect(db_file) as conn:
+                for table in ("action_steps", "prompt_repairs", "experiment_runs"):
+                    cur = conn.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
+                    n += max(cur.rowcount or 0, 0)
+                conn.commit()
+            return n
+
+        deleted = await asyncio.to_thread(_sync)
+    return deleted
+
+
+async def _delete_run_everything(run_id: str) -> Dict[str, Any]:
+    """Delete a run from every DB candidate location plus its on-disk artifacts."""
+    rows_deleted = 0
+    for db_file in _db_file_candidates():
+        if db_file.exists():
+            try:
+                rows_deleted += await _delete_run_rows(db_file, run_id)
+            except Exception as e:
+                logger.warning(f"DB delete failed for {db_file}: {e}")
+    artifacts_deleted = _delete_run_artifacts(run_id)
+    return {"rows_deleted": rows_deleted, "artifacts_deleted": artifacts_deleted}
+
+
+@app.post("/api/runs/{run_id}/clear")
+async def clear_run(run_id: str):
+    """Clear a running task: cancels execution, marks the record 'cancelled',
+    and notifies all listeners to reset their live view."""
+    was_running = run_id in ws_manager.run_cancel_events
+    if was_running:
+        ws_manager.run_cancel_events[run_id].set()
+        await ws_manager.broadcast(run_id, "status", {"message": "Run cleared by user."})
+    # Finalize any lingering 'running'/'pending' row (live or stale) so it can
+    # never be treated as active after a restart.
+    for db_file in _db_file_candidates():
+        if not db_file.exists():
+            continue
+        try:
+            import aiosqlite
+
+            async with aiosqlite.connect(db_file) as db:
+                await db.execute(
+                    "UPDATE experiment_runs SET status='cancelled', completed_at=datetime('now') "
+                    "WHERE run_id=? AND status IN ('running', 'pending')",
+                    (run_id,),
+                )
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Could not mark run {run_id} cancelled: {e}")
+    await ws_manager.broadcast(run_id, "run_cleared", {"run_id": run_id})
+    return {"status": "cleared", "was_running": was_running}
+
+
+@app.delete("/api/runs")
+async def clear_all_runs():
+    """Delete ALL recorded runs: DB rows, JSONL traces, screenshots, CSV exports."""
+    # Cancel anything still executing so nothing writes new rows mid-deletion.
+    running_ids = list(ws_manager.run_cancel_events.keys())
+    for rid in running_ids:
+        ws_manager.run_cancel_events[rid].set()
+        await ws_manager.broadcast(rid, "status", {"message": "Run cleared by user."})
+
+    all_run_ids: set = set(running_ids)
+    for db_file in _db_file_candidates():
+        if not db_file.exists():
+            continue
+        try:
+            import aiosqlite
+
+            async with aiosqlite.connect(db_file) as db:
+                async with db.execute("SELECT run_id FROM experiment_runs") as cur:
+                    all_run_ids.update(row[0] for row in await cur.fetchall())
+                await db.execute("DELETE FROM action_steps")
+                await db.execute("DELETE FROM prompt_repairs")
+                await db.execute("DELETE FROM experiment_runs")
+                await db.commit()
+        except Exception as e:
+            logger.warning(f"Could not clear DB {db_file}: {e}")
+
+    # Wipe every artifact directory.
+    for base in _run_artifact_dirs():
+        if base.is_dir():
+            for child in base.iterdir():
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink()
+                except Exception:
+                    pass
+
+    for rid in running_ids:
+        await ws_manager.broadcast(rid, "run_cleared", {"run_id": rid})
+
+    return {"status": "cleared", "deleted_runs": len(all_run_ids)}
+
+
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str):
+    """Delete a single recorded run with all of its steps, repairs and artifacts."""
+    if run_id in ws_manager.run_cancel_events:
+        raise HTTPException(status_code=409, detail="Run is still executing — stop or clear it first.")
+    result = await _delete_run_everything(run_id)
+    if result["rows_deleted"] == 0 and not result["artifacts_deleted"]:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return {"status": "deleted", "run_id": run_id, **result}
 
 
 @app.get("/api/related-videos")
@@ -525,6 +799,11 @@ async def get_metrics():
 @app.websocket("/ws/agent/{run_id}")
 async def agent_websocket(websocket: WebSocket, run_id: str):
     await ws_manager.connect(run_id, websocket)
+    # Orphan guard: if no run is executing for this id (e.g. backend restarted,
+    # or the client reconnected to an old run), tell the client to reset its
+    # Agent View instead of waiting forever. Never resumes an old task.
+    if run_id not in ws_manager.run_cancel_events:
+        await ws_manager.broadcast(run_id, "run_cleared", {"run_id": run_id})
     try:
         # Keep connection open and handle client messages
         while True:
@@ -601,7 +880,7 @@ async def execute_agent_run(
                     await ws_manager.broadcast(run_id, "status", {"message": "Run cancelled by user."})
                     await exp_logger.end_run(
                         run_id=run_id,
-                        status="failed",
+                        status="cancelled",
                         total_actions=metrics.total_actions,
                         total_retries=0,
                         total_tokens=0,
@@ -755,6 +1034,7 @@ async def execute_agent_run(
     finally:
         if run_id in ws_manager.run_cancel_events:
             del ws_manager.run_cancel_events[run_id]
+        ws_manager.run_sessions.pop(run_id, None)
 
 
 if __name__ == "__main__":
