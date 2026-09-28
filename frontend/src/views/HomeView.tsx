@@ -5,6 +5,8 @@ import { HandwritingText } from "@/components/ui/handwriting-text";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { BorderBeam } from "border-beam";
+import { useTheme } from "@/lib/theme";
 
 interface HomeViewProps {
   onStartRun: (params: {
@@ -18,6 +20,7 @@ interface HomeViewProps {
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
+  const { theme } = useTheme();
   const [goal, setGoal] = useState("");
   const [strategy, setStrategy] = useState("plan_then_execute");
   const [model, setModel] = useState("meta/llama-3.2-11b-vision-instruct");
@@ -141,73 +144,77 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Column: Goal Input & Quick Chips */}
         <div className="lg:col-span-8 space-y-6">
-          <Card className="glass-card">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-white">
-                <Compass className="h-5 w-5 text-emerald-400" />
-                <span>Specify Your Task Goal</span>
-              </CardTitle>
-              <CardDescription>
-                Describe what you want the autonomous browser agent to achieve in plain English.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="relative">
-                <textarea
-                  value={goal}
-                  onChange={(e) => setGoal(e.target.value)}
-                  placeholder="e.g. Find the cheapest laptop under Rs.60,000 with 16GB RAM on Flipkart"
-                  rows={4}
-                  className="w-full rounded-xl border border-white/10 bg-zinc-950/80 p-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-all font-sans"
-                />
-              </div>
-
-              {/* Sample Goals */}
-              <div className="space-y-2">
-                <span className="text-xs font-medium text-zinc-400">Example Prompts:</span>
-                <div className="flex flex-wrap gap-2">
-                  {sampleGoals.map((sample, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setGoal(sample)}
-                      className="rounded-lg border border-white/5 bg-zinc-900/60 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-400 hover:bg-zinc-800/60 transition-all text-left"
-                    >
-                      {sample}
-                    </button>
-                  ))}
+          <BorderBeam size="md" colorVariant="colorful" strength={0.7} theme={theme}>
+            <Card className="glass-card">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-white">
+                  <Compass className="h-5 w-5 text-emerald-400" />
+                  <span>Specify Your Task Goal</span>
+                </CardTitle>
+                <CardDescription>
+                  Describe what you want the autonomous browser agent to achieve in plain English.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="relative">
+                  <BorderBeam size="md" colorVariant="colorful" strength={0.7} className="w-full" theme={theme}>
+                    <textarea
+                      value={goal}
+                      onChange={(e) => setGoal(e.target.value)}
+                      placeholder="e.g. Find the cheapest laptop under Rs.60,000 with 16GB RAM on Flipkart"
+                      rows={4}
+                      className="w-full rounded-xl border border-white/10 bg-zinc-950/80 p-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-all font-sans block"
+                    />
+                  </BorderBeam>
                 </div>
-              </div>
 
-              {/* Action Buttons */}
-              <div className="flex flex-wrap gap-3 pt-2">
-                <Button
-                  onClick={handleExecute}
-                  disabled={!goal.trim() || isPlanning}
-                  size="lg"
-                  className="flex-1 sm:flex-initial flex items-center gap-2"
-                >
-                  <Play className="h-4 w-4 fill-current" />
-                  <span>Execute in Browser Now</span>
-                </Button>
-                <Button
-                  onClick={handleGeneratePlan}
-                  disabled={!goal.trim() || isPlanning}
-                  variant="outline"
-                  size="lg"
-                  className="flex items-center gap-2"
-                >
-                  <ListTree className="h-4 w-4 text-emerald-400" />
-                  <span>{isPlanning ? "Planning..." : "Plan Only (Preview)"}</span>
-                </Button>
-              </div>
-
-              {planError && (
-                <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-400">
-                  {planError}
+                {/* Sample Goals */}
+                <div className="space-y-2">
+                  <span className="text-xs font-medium text-zinc-400">Example Prompts:</span>
+                  <div className="flex flex-wrap gap-2">
+                    {sampleGoals.map((sample, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setGoal(sample)}
+                        className="rounded-lg border border-white/5 bg-zinc-900/60 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-400 hover:bg-zinc-800/60 transition-all text-left"
+                      >
+                        {sample}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+
+                {/* Action Buttons */}
+                <div className="flex flex-wrap gap-3 pt-2">
+                  <Button
+                    onClick={handleExecute}
+                    disabled={!goal.trim() || isPlanning}
+                    size="lg"
+                    className="flex-1 sm:flex-initial flex items-center gap-2"
+                  >
+                    <Play className="h-4 w-4 fill-current" />
+                    <span>Execute in Browser Now</span>
+                  </Button>
+                  <Button
+                    onClick={handleGeneratePlan}
+                    disabled={!goal.trim() || isPlanning}
+                    variant="outline"
+                    size="lg"
+                    className="flex items-center gap-2"
+                  >
+                    <ListTree className="h-4 w-4 text-emerald-400" />
+                    <span>{isPlanning ? "Planning..." : "Plan Only (Preview)"}</span>
+                  </Button>
+                </div>
+
+                {planError && (
+                  <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs text-red-400">
+                    {planError}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </BorderBeam>
 
           {/* Generated Plan Preview (if available) */}
           {generatedPlan && (

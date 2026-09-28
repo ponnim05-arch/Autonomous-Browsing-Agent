@@ -1,7 +1,8 @@
 import React, { useState } from "react";
-import { Zap, Activity, BarChart3, Search, Terminal, Globe, Cpu, Server, CheckCircle2, AlertCircle } from "lucide-react";
+import { Zap, Activity, BarChart3, Search, Terminal, Globe, Cpu, Server, CheckCircle2, AlertCircle, Sun, Moon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useTheme } from "@/lib/theme";
 
 interface NavbarProps {
   activeTab: string;
@@ -19,6 +20,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   config,
 }) => {
   const [showDiag, setShowDiag] = useState(false);
+  const { theme, toggleTheme } = useTheme();
 
   const tabs = [
     { id: "home", label: "Home", icon: Globe },
@@ -119,6 +121,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                   backendConnected ? "bg-emerald-400 shadow-sm shadow-emerald-400" : "bg-red-500"
                 }`}
               />
+            </button>
+
+            {/* Light / Dark Theme Toggle Button */}
+            <button
+              onClick={toggleTheme}
+              className="flex items-center justify-center h-8 w-8 rounded-xl border border-white/10 bg-zinc-900/50 text-zinc-300 hover:bg-zinc-800 hover:text-white transition-all hover:scale-105 active:scale-95 theme-toggle-btn"
+              title={theme === "dark" ? "Switch to Light Theme" : "Switch to Dark Theme"}
+              aria-label="Toggle light or dark theme"
+            >
+              {theme === "dark" ? (
+                <Sun className="h-4 w-4 text-amber-400 transition-transform duration-300 hover:rotate-45" />
+              ) : (
+                <Moon className="h-4 w-4 text-emerald-500 transition-transform duration-300 -rotate-12" />
+              )}
             </button>
           </div>
         </div>

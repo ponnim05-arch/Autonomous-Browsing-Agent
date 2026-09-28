@@ -659,9 +659,122 @@ async def delete_run(run_id: str):
 
 
 @app.get("/api/related-videos")
-async def get_related_videos():
-    """Returns top 10 latest videos related to Prasad Tech in Telugu."""
-    scratch_file = ROOT_DIR.parent / "brain" / "latest_prasad_tech_videos.json"
+async def get_related_videos(query: str = ""):
+    """
+    Returns top 10 YouTube videos related to the given search query.
+    When query is empty, falls back to the curated Prasad Tech list or local cache.
+    """
+    import re as _re
+
+    # ── Helper: parse YouTube search HTML for video cards ────────────────────
+    async def _fetch_youtube_search(search_query: str) -> list:
+        """Scrape YouTube search results using httpx (no API key needed)."""
+        search_url = "https://www.youtube.com/results"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        params = {"search_query": search_query, "sp": "CAI%253D"}  # sort by upload date
+        try:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.get(search_url, params=params, headers=headers)
+                resp.raise_for_status()
+                html = resp.text
+
+            # YouTube embeds its data as JSON in ytInitialData
+            match = _re.search(r"var ytInitialData\s*=\s*(\{.+?\});\s*</script>", html, _re.DOTALL)
+            if not match:
+                return []
+            raw_json = match.group(1)
+            data = json.loads(raw_json)
+
+            contents = (
+                data.get("contents", {})
+                    .get("twoColumnSearchResultsRenderer", {})
+                    .get("primaryContents", {})
+                    .get("sectionListRenderer", {})
+                    .get("contents", [])
+            )
+
+            videos = []
+            rank = 1
+            for section in contents:
+                items = (
+                    section.get("itemSectionRenderer", {}).get("contents", [])
+                )
+                for item in items:
+                    vr = item.get("videoRenderer")
+                    if not vr:
+                        continue
+                    video_id = vr.get("videoId", "")
+                    if not video_id:
+                        continue
+
+                    title = (
+                        vr.get("title", {})
+                          .get("runs", [{}])[0]
+                          .get("text", "")
+                    )
+                    author = (
+                        vr.get("ownerText", {})
+                          .get("runs", [{}])[0]
+                          .get("text", "")
+                    )
+                    thumbnails = vr.get("thumbnail", {}).get("thumbnails", [])
+                    thumbnail = (
+                        thumbnails[-1]["url"] if thumbnails
+                        else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                    )
+                    # Duration
+                    duration = (
+                        vr.get("lengthText", {}).get("simpleText", "")
+                    )
+                    # View count
+                    views = (
+                        vr.get("viewCountText", {}).get("simpleText", "")
+                        or vr.get("viewCountText", {})
+                              .get("runs", [{}])[0]
+                              .get("text", "")
+                    )
+                    # Published time
+                    time_ago = (
+                        vr.get("publishedTimeText", {}).get("simpleText", "")
+                    )
+
+                    videos.append({
+                        "rank": rank,
+                        "videoId": video_id,
+                        "title": title,
+                        "author": author,
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                        "thumbnail": thumbnail,
+                        "duration": duration,
+                        "views": views,
+                        "timeAgo": time_ago,
+                    })
+                    rank += 1
+                    if rank > 10:
+                        break
+                if rank > 10:
+                    break
+            return videos
+        except Exception as exc:
+            logger.warning(f"[related-videos] YouTube scrape failed for '{search_query}': {exc}")
+            return []
+
+    # ── If a query was provided, do a live YouTube search ────────────────────
+    if query.strip():
+        results = await _fetch_youtube_search(query.strip())
+        if results:
+            return results
+        # If live search failed, still return empty so the frontend can show a message
+        return []
+
+    # ── No query: try local cache first ──────────────────────────────────────
     local_cached = ROOT_DIR / "data" / "latest_prasad_tech_videos.json"
     if local_cached.exists():
         try:
@@ -670,7 +783,7 @@ async def get_related_videos():
         except Exception:
             pass
 
-    # Curated fallbacks with actual live data
+    # ── Final curated fallback (Prasad Tech in Telugu) ───────────────────────
     return [
         {
             "rank": 1,
@@ -678,7 +791,8 @@ async def get_related_videos():
             "title": "POCO X8 Series Unboxing & Initial Impressions || Insane Battery Phones 🤯",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=kGU6fiO9WuU",
-            "thumbnail": "https://i.ytimg.com/vi/kGU6fiO9WuU/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/kGU6fiO9WuU/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 2,
@@ -686,7 +800,8 @@ async def get_related_videos():
             "title": "Infinix HOT 70 Pro 5G Unboxing & Initial Impressions || The New Budget King? 😱",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=S_2CR951ErA",
-            "thumbnail": "https://i.ytimg.com/vi/S_2CR951ErA/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/S_2CR951ErA/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 3,
@@ -694,7 +809,8 @@ async def get_related_videos():
             "title": "Tech News 2241 || iQOO 16, iOS 27, Xiaomi 18 Fold, Nothing 2027 Launches, Smart Wheelchair, Robot",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=q237uN0nfOY",
-            "thumbnail": "https://i.ytimg.com/vi/q237uN0nfOY/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/q237uN0nfOY/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 4,
@@ -702,7 +818,8 @@ async def get_related_videos():
             "title": "Tech News 2240 || OnePlus 16, Huawei Mate XT 2, Gemini Coding, IMEI Tamper, Sim Swap",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=uV5JVRXXUcA",
-            "thumbnail": "https://i.ytimg.com/vi/uV5JVRXXUcA/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/uV5JVRXXUcA/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 5,
@@ -710,7 +827,8 @@ async def get_related_videos():
             "title": "Which is the best Water Purifier? Urban Native M3 pro vs Aquaguard ritz pro 4X",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=EeUxMaCqxHo",
-            "thumbnail": "https://i.ytimg.com/vi/EeUxMaCqxHo/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/EeUxMaCqxHo/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 6,
@@ -718,7 +836,8 @@ async def get_related_videos():
             "title": "vivo T5 5G Unboxing & First Impressions || 7050mAh Battery + 144Hz AMOLED | Telugu",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=82JoLvTNhOc",
-            "thumbnail": "https://i.ytimg.com/vi/82JoLvTNhOc/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/82JoLvTNhOc/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 7,
@@ -726,7 +845,8 @@ async def get_related_videos():
             "title": "HONOR Robot Phone Is INSANE 😲🤯 | A Real-Life SCI-FI Phone! 🥳",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=Wvv6wfWQlLM",
-            "thumbnail": "https://i.ytimg.com/vi/Wvv6wfWQlLM/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/Wvv6wfWQlLM/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 8,
@@ -734,7 +854,8 @@ async def get_related_videos():
             "title": "Tech News 2238 || Mobile Prices GST Cut, iPhone Ultra, New Mac's, Plaud One, Meta.Etc..",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=n48kAO6cMAs",
-            "thumbnail": "https://i.ytimg.com/vi/n48kAO6cMAs/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/n48kAO6cMAs/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 9,
@@ -742,7 +863,8 @@ async def get_related_videos():
             "title": "Nothing OS 5.0 New Features & Changes Explained! 🥳",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=1oD_4E2_lcM",
-            "thumbnail": "https://i.ytimg.com/vi/1oD_4E2_lcM/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/1oD_4E2_lcM/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         },
         {
             "rank": 10,
@@ -750,7 +872,8 @@ async def get_related_videos():
             "title": "Upcoming Mobiles in September 2026 🥳 || Exciting Launches ahead 🤩",
             "author": "Prasadtechintelugu",
             "url": "https://www.youtube.com/watch?v=kZTe4kl8Q3U",
-            "thumbnail": "https://i.ytimg.com/vi/kZTe4kl8Q3U/hqdefault.jpg"
+            "thumbnail": "https://i.ytimg.com/vi/kZTe4kl8Q3U/hqdefault.jpg",
+            "duration": "", "views": "", "timeAgo": "",
         }
     ]
 

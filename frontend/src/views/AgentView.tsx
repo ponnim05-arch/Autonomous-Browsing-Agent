@@ -28,6 +28,8 @@ import {
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { BorderBeam } from "border-beam";
+import { useTheme } from "@/lib/theme";
 
 interface AgentViewProps {
   runId: string | null;
@@ -76,10 +78,12 @@ export const AgentView: React.FC<AgentViewProps> = ({
   onClearRun,
   onNavigateHome,
 }) => {
+  const { theme } = useTheme();
   const [viewMode, setViewMode] = useState<"video" | "snapshot">("video");
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [relatedVideos, setRelatedVideos] = useState<RelatedVideo[]>([]);
+  const [videosLoading, setVideosLoading] = useState(false);
   const [activePreviewUrl, setActivePreviewUrl] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
 
@@ -109,17 +113,22 @@ export const AgentView: React.FC<AgentViewProps> = ({
     setImgError(false);
   }, [currentScreenshot]);
 
-  // Fetch top 10 related videos from backend
+  // Re-fetch related videos whenever the goal or runId changes
   useEffect(() => {
-    fetch(apiUrl("/api/related-videos"))
+    // Clear stale videos immediately so old content doesn't linger
+    setRelatedVideos([]);
+    if (!goal?.trim()) return;
+
+    setVideosLoading(true);
+    const encodedQuery = encodeURIComponent(goal.trim());
+    fetch(apiUrl(`/api/related-videos?query=${encodedQuery}`))
       .then((res) => (res.ok ? res.json() : []))
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
-          setRelatedVideos(data);
-        }
+        setRelatedVideos(Array.isArray(data) ? data : []);
       })
-      .catch((err) => console.error("Error fetching related videos:", err));
-  }, []);
+      .catch((err) => console.error("Error fetching related videos:", err))
+      .finally(() => setVideosLoading(false));
+  }, [goal, runId]);
 
   // Make definitely sure the main task is opened in a new tab upon completion or target reach
   useEffect(() => {
@@ -262,76 +271,78 @@ export const AgentView: React.FC<AgentViewProps> = ({
         {/* Left Column: Subtask Checklist & Real-Time Event Log */}
         <div className="lg:col-span-5 space-y-6">
           {/* Progress Card */}
-          <Card className="glass-card">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-sm font-semibold text-white flex items-center gap-2">
-                  <Cpu className="h-4 w-4 text-emerald-400" />
-                  <span>Execution Progress</span>
-                </CardTitle>
-                <span className="text-xs font-mono text-emerald-400 font-bold">
-                  {totalSteps > 0 ? `${currentStepIndex + 1} / ${totalSteps}` : "Preparing..."}
-                </span>
-              </div>
-              {/* Progress Bar */}
-              <div className="w-full bg-zinc-950 rounded-full h-2 mt-2 overflow-hidden border border-white/5">
-                <div
-                  className="bg-emerald-500 h-2 transition-all duration-500 rounded-full shadow-sm shadow-emerald-500/50"
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
-            </CardHeader>
-            <CardContent>
-              {/* Planned Steps list */}
-              <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                {steps.length > 0 ? (
-                  steps.map((st, idx) => {
-                    const isCompleted = idx < currentStepIndex || status === "completed";
-                    const isCurrent = idx === currentStepIndex && status === "running";
-                    return (
-                      <div
-                        key={idx}
-                        className={`flex items-center gap-3 rounded-xl border p-2.5 text-xs transition-all ${
-                          isCurrent
-                            ? "border-emerald-500/50 bg-emerald-500/10 text-white"
-                            : isCompleted
-                            ? "border-white/5 bg-zinc-950/40 text-zinc-400"
-                            : "border-white/5 bg-zinc-950/20 text-zinc-500"
-                        }`}
-                      >
+          <BorderBeam size="md" colorVariant="colorful" strength={0.7} theme={theme}>
+            <Card className="glass-card">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-sm font-semibold text-white flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-emerald-400" />
+                    <span>Execution Progress</span>
+                  </CardTitle>
+                  <span className="text-xs font-mono text-emerald-400 font-bold">
+                    {totalSteps > 0 ? `${currentStepIndex + 1} / ${totalSteps}` : "Preparing..."}
+                  </span>
+                </div>
+                {/* Progress Bar */}
+                <div className="w-full bg-zinc-950 rounded-full h-2 mt-2 overflow-hidden border border-white/5">
+                  <div
+                    className="bg-emerald-500 h-2 transition-all duration-500 rounded-full shadow-sm shadow-emerald-500/50"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+              </CardHeader>
+              <CardContent>
+                {/* Planned Steps list */}
+                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                  {steps.length > 0 ? (
+                    steps.map((st, idx) => {
+                      const isCompleted = idx < currentStepIndex || status === "completed";
+                      const isCurrent = idx === currentStepIndex && status === "running";
+                      return (
                         <div
-                          className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md font-mono text-[10px] ${
-                            isCompleted
-                              ? "bg-emerald-500/20 text-emerald-400"
-                              : isCurrent
-                              ? "bg-emerald-500 text-zinc-950 font-bold"
-                              : "bg-zinc-800 text-zinc-500"
+                          key={idx}
+                          className={`flex items-center gap-3 rounded-xl border p-2.5 text-xs transition-all ${
+                            isCurrent
+                              ? "border-emerald-500/50 bg-emerald-500/10 text-white"
+                              : isCompleted
+                              ? "border-white/5 bg-zinc-950/40 text-zinc-400"
+                              : "border-white/5 bg-zinc-950/20 text-zinc-500"
                           }`}
                         >
-                          {isCompleted ? "✓" : idx + 1}
+                          <div
+                            className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md font-mono text-[10px] ${
+                              isCompleted
+                                ? "bg-emerald-500/20 text-emerald-400"
+                                : isCurrent
+                                ? "bg-emerald-500 text-zinc-950 font-bold"
+                                : "bg-zinc-800 text-zinc-500"
+                            }`}
+                          >
+                            {isCompleted ? "✓" : idx + 1}
+                          </div>
+                          <div className="flex-1 truncate">
+                            <span className="font-semibold uppercase tracking-wider text-[10px] mr-2">
+                              {st.action}
+                            </span>
+                            <span className="text-zinc-300">
+                              {st.description || st.value || st.selector}
+                            </span>
+                          </div>
+                          {st.checkpoint && (
+                            <span className="text-[10px] text-amber-400 border border-amber-400/20 rounded px-1">
+                              CP
+                            </span>
+                          )}
                         </div>
-                        <div className="flex-1 truncate">
-                          <span className="font-semibold uppercase tracking-wider text-[10px] mr-2">
-                            {st.action}
-                          </span>
-                          <span className="text-zinc-300">
-                            {st.description || st.value || st.selector}
-                          </span>
-                        </div>
-                        {st.checkpoint && (
-                          <span className="text-[10px] text-amber-400 border border-amber-400/20 rounded px-1">
-                            CP
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })
-                ) : (
-                  <p className="text-xs text-zinc-500 italic py-2">No step trace queued yet.</p>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+                      );
+                    })
+                  ) : (
+                    <p className="text-xs text-zinc-500 italic py-2">No step trace queued yet.</p>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </BorderBeam>
 
           {/* Real-Time Telemetry & Console Log */}
           <Card className="glass-card">
@@ -374,7 +385,8 @@ export const AgentView: React.FC<AgentViewProps> = ({
 
         {/* Right Column: Live Browser & Media Preview Container */}
         <div className="lg:col-span-7 space-y-6">
-          <Card className="glass-card overflow-hidden border-white/10 shadow-2xl">
+          <BorderBeam size="md" colorVariant="colorful" strength={0.7} theme={theme}>
+            <Card className="glass-card overflow-hidden border-white/10 shadow-2xl">
             {/* Browser Window Header & Address Bar */}
             <div className="border-b border-white/5 bg-zinc-950/95 px-4 py-3 space-y-2">
               <div className="flex items-center justify-between gap-3">
@@ -553,6 +565,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
               </div>
             )}
           </Card>
+        </BorderBeam>
 
           {/* Extracted Products & Page Data (if available) */}
           {extractedItems && extractedItems.length > 0 && (
@@ -599,24 +612,45 @@ export const AgentView: React.FC<AgentViewProps> = ({
         </div>
       </div>
 
-      {/* ── Top 10 Latest Videos & Updates Related to Task ── */}
-      {relatedVideos.length > 0 && (
+      {/* ── Top 10 Videos Related to Task ── */}
+      {(videosLoading || relatedVideos.length > 0) && (
         <div className="space-y-4 pt-4">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
               <div className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400">
                 <Flame className="h-4 w-4 text-amber-400" />
-                <span>Top 10 Latest Videos & Tech Updates</span>
+                <span>Top 10 Related Videos</span>
               </div>
-              <h3 className="text-lg font-bold text-white">
-                Prasad Tech in Telugu — Latest YouTube Releases
+              <h3 className="text-lg font-bold text-white line-clamp-1">
+                {goal ? `Results for: "${goal}"` : "Related YouTube Videos"}
               </h3>
             </div>
             <Badge variant="emerald" className="text-xs font-mono">
-              10 Latest Updates
+              {videosLoading ? "Searching..." : `${relatedVideos.length} Results`}
             </Badge>
           </div>
 
+          {/* Loading skeleton */}
+          {videosLoading && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="flex flex-col rounded-2xl border border-white/5 bg-zinc-900/60 p-3 space-y-3 animate-pulse">
+                  <div className="aspect-video w-full rounded-xl bg-zinc-800" />
+                  <div className="space-y-2">
+                    <div className="h-3 w-full rounded bg-zinc-800" />
+                    <div className="h-3 w-2/3 rounded bg-zinc-800" />
+                    <div className="h-2 w-1/3 rounded bg-zinc-700" />
+                  </div>
+                  <div className="flex gap-1.5">
+                    <div className="flex-1 h-7 rounded-lg bg-zinc-800" />
+                    <div className="w-8 h-7 rounded-lg bg-zinc-800" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Results grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
             {relatedVideos.map((vid) => {
               const isCurrent = effectiveUrl?.includes(vid.videoId);

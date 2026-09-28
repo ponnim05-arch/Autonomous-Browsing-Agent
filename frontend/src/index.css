@@ -91,3 +91,411 @@ code, pre, kbd {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.25);
 }
+
+/* ══════════════════════════════════════════════════════════
+   LIGHT THEME STYLING: Zinc + Electric Blue
+   Scoped strictly to html.light / html[data-theme="light"]
+   Preserves 100% of dark mode styling and all animations.
+   ══════════════════════════════════════════════════════════ */
+html.light {
+  --background: 240 4.8% 98%;
+  --foreground: 240 5.9% 10%;
+
+  --card: 0 0% 100%;
+  --card-foreground: 240 5.9% 10%;
+
+  --popover: 0 0% 100%;
+  --popover-foreground: 240 5.9% 10%;
+
+  --primary: 217.2 91.2% 59.8%; /* Electric Blue #3B82F6 */
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 240 4.8% 95.9%; /* Zinc 100 #F4F4F5 */
+  --secondary-foreground: 240 5.9% 10%;
+
+  --muted: 240 4.8% 95.9%; /* Zinc 100 */
+  --muted-foreground: 240 3.8% 46.1%; /* Zinc 500 #71717A */
+
+  --accent: 217.2 91.2% 95%;
+  --accent-foreground: 221.2 83.2% 53.3%;
+
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 0 0% 98%;
+
+  --border: 240 5.9% 90%; /* Zinc 200 #E4E4E7 */
+  --input: 240 5.9% 90%;
+  --ring: 217.2 91.2% 59.8%; /* Electric Blue #3B82F6 */
+}
+
+/* Background & Body in light mode */
+html.light body,
+html.light .app-container {
+  background-color: #fafafa !important; /* Zinc 50 */
+  color: #18181b !important; /* Zinc 900 */
+}
+
+html.light ::selection {
+  background-color: rgba(59, 130, 246, 0.18) !important;
+  color: #1d4ed8 !important;
+}
+
+/* Glass cards and panels in light mode */
+html.light .glass-card {
+  background: #ffffff !important;
+  border-color: #e4e4e7 !important; /* Zinc 200 */
+  box-shadow: 0 4px 20px -2px rgba(24, 24, 27, 0.05), 0 1px 3px rgba(24, 24, 27, 0.03) !important;
+}
+
+html.light .glass-card:hover {
+  border-color: rgba(59, 130, 246, 0.45) !important; /* Electric Blue hover */
+  box-shadow: 0 8px 30px -4px rgba(59, 130, 246, 0.15) !important; /* Electric Blue subtle glow */
+}
+
+html.light .glass-panel {
+  background: #ffffff !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 4px 16px -2px rgba(24, 24, 27, 0.05) !important;
+}
+
+/* Header & Navigation in light mode */
+html.light header {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+  border-bottom: 1px solid #e4e4e7 !important;
+}
+
+html.light nav {
+  background-color: #f4f4f5 !important; /* Zinc 100 */
+  border-color: #e4e4e7 !important;
+}
+
+html.light nav button {
+  color: #52525b !important; /* Zinc 600 */
+}
+
+html.light nav button:hover {
+  color: #18181b !important; /* Zinc 900 */
+  background-color: #ffffff !important;
+}
+
+/* Active navigation link: Electric Blue */
+html.light nav button.bg-zinc-800 {
+  background-color: #ffffff !important;
+  color: #2563eb !important; /* Electric Blue text */
+  border: 1px solid rgba(59, 130, 246, 0.25) !important;
+  box-shadow: 0 1px 3px rgba(59, 130, 246, 0.1) !important;
+}
+
+html.light nav button.bg-zinc-800 svg {
+  color: #3b82f6 !important;
+}
+
+/* Logo container & branding */
+html.light header .bg-emerald-500\/10.border-emerald-500\/30 {
+  background-color: rgba(59, 130, 246, 0.1) !important;
+  border-color: rgba(59, 130, 246, 0.3) !important;
+  color: #3b82f6 !important;
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.15) !important;
+}
+
+html.light header .bg-emerald-500\/10.border-emerald-500\/30 svg {
+  color: #3b82f6 !important;
+}
+
+/* Typography in light mode: Zinc Scale */
+html.light .text-white {
+  color: #18181b !important; /* Zinc 900 */
+}
+
+html.light .text-zinc-100 {
+  color: #18181b !important; /* Zinc 900 */
+}
+
+html.light .text-zinc-200 {
+  color: #27272a !important; /* Zinc 800 */
+}
+
+html.light .text-zinc-300 {
+  color: #3f3f46 !important; /* Zinc 700 */
+}
+
+html.light .text-zinc-400 {
+  color: #52525b !important; /* Zinc 600 */
+}
+
+html.light .text-zinc-500 {
+  color: #71717a !important; /* Zinc 500 */
+}
+
+html.light .text-zinc-600 {
+  color: #a1a1aa !important; /* Zinc 400 */
+}
+
+/* Background layers in light mode: Zinc Scale */
+html.light .bg-zinc-950,
+html.light .bg-zinc-950\/95,
+html.light .bg-zinc-950\/90,
+html.light .bg-zinc-950\/80,
+html.light .bg-zinc-950\/60,
+html.light .bg-zinc-950\/40,
+html.light .bg-zinc-950\/20 {
+  background-color: #f4f4f5 !important; /* Zinc 100 */
+}
+
+/* Surface / Card backgrounds: Pure White or Zinc Surface */
+html.light .bg-zinc-900,
+html.light .bg-zinc-900\/90,
+html.light .bg-zinc-900\/60,
+html.light .bg-zinc-900\/50 {
+  background-color: #ffffff !important; /* Surface */
+}
+
+/* Hero card banner in light mode */
+html.light .from-zinc-900\/90 {
+  background-image: linear-gradient(to bottom, #ffffff, #f4f4f5) !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 10px 30px -5px rgba(24, 24, 27, 0.05), 0 1px 3px rgba(24, 24, 27, 0.03) !important;
+}
+
+html.light .bg-zinc-800,
+html.light .bg-zinc-800\/60,
+html.light .bg-zinc-800\/40 {
+  background-color: #e4e4e7 !important; /* Zinc 200 */
+  color: #18181b !important;
+}
+
+html.light .border-white\/5,
+html.light .border-white\/10,
+html.light .border-white\/20,
+html.light .border-zinc-800 {
+  border-color: #e4e4e7 !important; /* Zinc 200 */
+}
+
+/* Primary Action Buttons: Electric Blue #3B82F6 */
+html.light button.bg-emerald-500,
+html.light button.bg-emerald-500\/90,
+html.light a.bg-emerald-500 {
+  background-color: #3b82f6 !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3) !important;
+}
+
+html.light button.bg-emerald-500:hover,
+html.light button.hover\:bg-emerald-400:hover,
+html.light a.bg-emerald-500:hover {
+  background-color: #2563eb !important;
+  color: #ffffff !important;
+  box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4) !important;
+}
+
+html.light button.bg-emerald-500:active,
+html.light a.bg-emerald-500:active {
+  background-color: #1d4ed8 !important;
+}
+
+/* Secondary Buttons */
+html.light button.bg-zinc-800:not(nav button) {
+  background-color: #f4f4f5 !important;
+  border-color: #e4e4e7 !important;
+  color: #18181b !important;
+}
+
+html.light button.bg-zinc-800:not(nav button):hover {
+  background-color: #e4e4e7 !important;
+  color: #18181b !important;
+}
+
+/* Inputs, textareas & select in light mode */
+html.light textarea,
+html.light input:not([type="checkbox"]):not([type="radio"]),
+html.light select {
+  background-color: #ffffff !important;
+  color: #18181b !important;
+  border-color: #e4e4e7 !important;
+  box-shadow: 0 1px 2px rgba(24, 24, 27, 0.04) !important;
+}
+
+html.light textarea::placeholder,
+html.light input::placeholder {
+  color: #a1a1aa !important; /* Zinc 400 */
+}
+
+/* Focus States: Electric Blue #3B82F6 with subtle glow ring */
+html.light textarea:focus,
+html.light input:focus,
+html.light select:focus {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15) !important;
+  outline: none !important;
+}
+
+/* Prompt chips & action buttons in light mode */
+html.light button.bg-zinc-900\/60,
+html.light button.bg-zinc-900\/50 {
+  background-color: #ffffff !important;
+  border-color: #e4e4e7 !important;
+  color: #3f3f46 !important;
+}
+
+html.light button.bg-zinc-900\/60:hover,
+html.light button.bg-zinc-900\/50:hover {
+  background-color: #f4f4f5 !important;
+  border-color: rgba(59, 130, 246, 0.4) !important;
+  color: #2563eb !important;
+}
+
+/* Selected cards & interactive highlights (Strategy, Browser mode, Inspector run, etc.) */
+html.light .border-emerald-500\/50.bg-emerald-500\/10,
+html.light .border-emerald-500.bg-emerald-500\/10,
+html.light .border-emerald-500\/60.bg-emerald-500\/10 {
+  border-color: #3b82f6 !important;
+  background-color: rgba(59, 130, 246, 0.08) !important;
+  color: #2563eb !important;
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.1) !important;
+}
+
+html.light .border-emerald-500\/30 {
+  border-color: rgba(59, 130, 246, 0.3) !important;
+}
+
+/* Brand pills, HandwritingText & Brand Accents in light mode */
+html.light .rounded-full.border-emerald-500\/30.bg-emerald-500\/10 {
+  background-color: rgba(59, 130, 246, 0.08) !important;
+  border-color: rgba(59, 130, 246, 0.3) !important;
+  color: #2563eb !important;
+}
+
+html.light .rounded-full.border-emerald-500\/30.bg-emerald-500\/10 svg {
+  color: #3b82f6 !important;
+}
+
+html.light .text-emerald-400:not(.semantic-success) {
+  color: #2563eb !important;
+}
+
+html.light .text-emerald-300:not(.semantic-success) {
+  color: #3b82f6 !important;
+}
+
+html.light .text-emerald-500:not(.semantic-success) {
+  color: #2563eb !important;
+}
+
+/* Hero background glow in light mode */
+html.light .bg-emerald-500\/10.blur-3xl {
+  background-color: rgba(59, 130, 246, 0.1) !important; /* Electric Blue glow */
+}
+
+html.light .bg-cyan-500\/10.blur-3xl {
+  background-color: rgba(6, 182, 212, 0.06) !important; /* Subtle Cyan glow */
+}
+
+/* Progress bar & active step indicator in light mode */
+html.light div.bg-emerald-500.h-2 {
+  background-color: #3b82f6 !important;
+  box-shadow: 0 1px 6px rgba(59, 130, 246, 0.4) !important;
+}
+
+html.light .border-emerald-500\/50.bg-emerald-500\/10 div.bg-emerald-500 {
+  background-color: #3b82f6 !important;
+  color: #ffffff !important;
+}
+
+/* Theme toggle button in light mode */
+html.light .theme-toggle-btn {
+  background-color: #f4f4f5 !important;
+  border-color: #e4e4e7 !important;
+  color: #3f3f46 !important;
+}
+
+html.light .theme-toggle-btn:hover {
+  background-color: #e4e4e7 !important;
+  color: #18181b !important;
+}
+
+html.light .theme-toggle-btn svg {
+  color: #3b82f6 !important;
+}
+
+/* Viewport Browser Address Bar & Header in light mode */
+html.light .border-b.bg-zinc-950\/95 {
+  background-color: #ffffff !important;
+  border-color: #e4e4e7 !important;
+}
+
+html.light div.bg-zinc-900\/90.border-white\/10 {
+  background-color: #f4f4f5 !important;
+  border-color: #e4e4e7 !important;
+  color: #18181b !important;
+}
+
+/* Terminal / Live event stream in light mode */
+html.light .h-72.bg-zinc-950\/90 {
+  background-color: #09090b !important;
+  border-color: #27272a !important;
+}
+
+html.light .h-72.bg-zinc-950\/90 .text-emerald-400 {
+  color: #60a5fa !important; /* Electric Blue command highlight */
+}
+
+/* Modal in light mode */
+html.light .bg-black\/70 {
+  background-color: rgba(9, 9, 11, 0.45) !important;
+}
+
+html.light .bg-zinc-900 {
+  background-color: #ffffff !important;
+}
+
+/* ══════════════════════════════════════════════════════════
+   SEMANTIC STATUS PRESERVATION IN LIGHT MODE
+   Green for successful states, online status, healthy backend, and completed states.
+   Amber for warnings. Red for errors.
+   ══════════════════════════════════════════════════════════ */
+/* Semantic Green (#22C55E / #16A34A) */
+html.light .bg-emerald-400,
+html.light .bg-emerald-500\/80,
+html.light span.rounded-full.bg-emerald-400,
+html.light span.rounded-full.bg-emerald-500 {
+  background-color: #22c55e !important;
+}
+
+html.light .lucide-check-circle,
+html.light .lucide-check-circle-2,
+html.light .lucide-check,
+html.light .lucide-shield-check {
+  color: #16a34a !important;
+}
+
+/* Completed step indicator in checklist */
+html.light .bg-emerald-500\/20.text-emerald-400 {
+  background-color: rgba(34, 197, 94, 0.12) !important;
+  color: #16a34a !important;
+}
+
+/* Success completion banner in AgentView */
+html.light .from-emerald-950\/70 {
+  background-image: linear-gradient(to right, rgba(34, 197, 94, 0.08), #ffffff, #ffffff) !important;
+  border-color: rgba(34, 197, 94, 0.3) !important;
+}
+
+html.light .from-emerald-950\/70 div.bg-emerald-500 {
+  background-color: #22c55e !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.25) !important;
+}
+
+/* Scrollbar in light mode */
+html.light ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+html.light ::-webkit-scrollbar-thumb {
+  background: rgba(39, 39, 42, 0.15);
+  border-radius: 9999px;
+}
+
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(39, 39, 42, 0.3);
+}
+

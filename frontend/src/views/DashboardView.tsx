@@ -4,8 +4,11 @@ import { BarChart3, TrendingUp, Clock, Zap, RotateCcw, Award, Layers } from "luc
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { useTheme } from "@/lib/theme";
 
 export const DashboardView: React.FC = () => {
+  const { theme } = useTheme();
+  const isLight = theme === "light";
   const [metrics, setMetrics] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
@@ -127,14 +130,20 @@ export const DashboardView: React.FC = () => {
           <CardContent className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                <CartesianGrid strokeDasharray="3 3" stroke={isLight ? "#e4e4e7" : "#27272a"} />
                 <XAxis dataKey="name" stroke="#71717a" tick={{ fontSize: 11 }} angle={-15} textAnchor="end" />
                 <YAxis stroke="#71717a" domain={[0, 100]} />
                 <Tooltip
-                  contentStyle={{ backgroundColor: "#18181b", borderColor: "#27272a", borderRadius: "12px" }}
-                  itemStyle={{ color: "#10b981" }}
+                  contentStyle={{
+                    backgroundColor: isLight ? "#ffffff" : "#18181b",
+                    borderColor: isLight ? "#e4e4e7" : "#27272a",
+                    borderRadius: "12px",
+                    color: isLight ? "#18181b" : "#ffffff",
+                    boxShadow: isLight ? "0 4px 20px -2px rgba(24, 24, 27, 0.08)" : undefined,
+                  }}
+                  itemStyle={{ color: isLight ? "#3b82f6" : "#10b981" }}
                 />
-                <Bar dataKey="successRate" fill="#10b981" radius={[6, 6, 0, 0]} name="Success Rate %" />
+                <Bar dataKey="successRate" fill={isLight ? "#3b82f6" : "#10b981"} radius={[6, 6, 0, 0]} name="Success Rate %" />
               </BarChart>
             </ResponsiveContainer>
           </CardContent>
@@ -149,11 +158,17 @@ export const DashboardView: React.FC = () => {
           <CardContent className="h-72">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
+                <CartesianGrid strokeDasharray="3 3" stroke={isLight ? "#e4e4e7" : "#27272a"} />
                 <XAxis dataKey="name" stroke="#71717a" tick={{ fontSize: 11 }} angle={-15} textAnchor="end" />
                 <YAxis stroke="#71717a" />
                 <Tooltip
-                  contentStyle={{ backgroundColor: "#18181b", borderColor: "#27272a", borderRadius: "12px" }}
+                  contentStyle={{
+                    backgroundColor: isLight ? "#ffffff" : "#18181b",
+                    borderColor: isLight ? "#e4e4e7" : "#27272a",
+                    borderRadius: "12px",
+                    color: isLight ? "#18181b" : "#ffffff",
+                    boxShadow: isLight ? "0 4px 20px -2px rgba(24, 24, 27, 0.08)" : undefined,
+                  }}
                   itemStyle={{ color: "#06b6d4" }}
                 />
                 <Bar dataKey="avgTime" fill="#06b6d4" radius={[6, 6, 0, 0]} name="Avg Time (s)" />
