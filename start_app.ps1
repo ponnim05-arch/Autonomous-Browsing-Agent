@@ -7,9 +7,16 @@ Write-Host "====================================================" -ForegroundCol
 
 $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+# Free up port 8000 if lingering
+$conn = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue
+if ($conn) {
+    Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+}
+
 # 1. Start FastAPI Backend in new window
 Write-Host "`n[1/2] Starting FastAPI Backend on http://127.0.0.1:8000..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ROOT\backend'; ..\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --reload"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ROOT\backend'; ..\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --loop asyncio"
 
 # 2. Wait 2 seconds for backend to initialize
 Start-Sleep -Seconds 2

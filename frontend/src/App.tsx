@@ -145,18 +145,35 @@ export function App() {
         if (type === "status") {
           setLogs((prev) => [...prev, { type: "info", message: data.message }]);
         } else if (type === "plan_ready") {
-          setSteps(data.steps || []);
-          setTotalSteps(data.total_steps || 0);
+          const recSteps = data.steps || [];
+          const total = data.total_steps || recSteps.length || 0;
+          setSteps(recSteps);
+          setTotalSteps(total);
           setLogs((prev) => [
             ...prev,
-            { type: "info", message: `Execution plan prepared with ${data.total_steps} actions.` },
+            { type: "info", message: `Execution plan prepared with ${total} actions.` },
           ]);
         } else if (type === "step_start") {
-          setCurrentStepIndex(data.step_index);
-          const desc = data.description || `${data.action} ${data.selector || data.value || ""}`;
+          const idx = data.step_index ?? 0;
+          setCurrentStepIndex(idx);
+          if (data.total_steps) {
+            setTotalSteps((prev) => (prev > 0 ? prev : data.total_steps));
+          }
+          setSteps((prev) => {
+            if (prev.length === 0 && data.total_steps) {
+              return Array.from({ length: data.total_steps }, (_, sIdx) => ({
+                action: sIdx === idx ? data.action : "action",
+                description: sIdx === idx ? (data.description || `${data.action} ${data.selector || data.value || ""}`) : `Step ${sIdx + 1}`,
+                selector: sIdx === idx ? data.selector : undefined,
+                value: sIdx === idx ? data.value : undefined,
+              }));
+            }
+            return prev;
+          });
+          const desc = data.description || `${data.action || ""} ${data.selector || data.value || ""}`.trim();
           setLogs((prev) => [
             ...prev,
-            { type: "step", message: `Step ${data.step_index + 1}/${data.total_steps}: ${desc}` },
+            { type: "step", message: `Step ${idx + 1}/${data.total_steps || "?"}: ${desc}` },
           ]);
         } else if (type === "step_completed") {
           if (data.url) setCurrentUrl(data.url);
@@ -179,6 +196,16 @@ export function App() {
         } else if (type === "browser_event") {
           setLogs((prev) => [...prev, { type: "info", message: data.message }]);
           if (data.url) setCurrentUrl(data.url);
+        } else if (type === "viewport_frame" || type === "viewport_update" || type === "screenshot_stream") {
+          if (data.url) setCurrentUrl(data.url);
+          if (data.title) setPageTitle(data.title);
+          if (data.data) {
+            setCurrentScreenshot(data.data);
+          } else if (data.screenshot_base64) {
+            setCurrentScreenshot(data.screenshot_base64);
+          } else if (data.screenshot) {
+            setCurrentScreenshot(`${data.screenshot}?t=${Date.now()}`);
+          }
         } else if (type === "run_cleared") {
           resetRunState();
           if (wsRef.current) {
@@ -186,6 +213,13 @@ export function App() {
             wsRef.current = null;
           }
         } else if (type === "run_finished") {
+          if (data.total_steps) {
+            setTotalSteps(data.total_steps);
+            setCurrentStepIndex(data.total_steps);
+          }
+          if (data.steps && data.steps.length > 0) {
+            setSteps(data.steps);
+          }
           if (data.final_url) setCurrentUrl(data.final_url);
           if (data.final_title) setPageTitle(data.final_title);
           if (data.final_screenshot_base64) {
@@ -194,17 +228,18 @@ export function App() {
             setCurrentScreenshot(`${data.final_screenshot}?t=${Date.now()}`);
           }
 
+          const msg = data.message || (data.status === "success" ? "Goal completed successfully!" : "Execution failed.");
           if (data.status === "success") {
             setAgentStatus("completed");
             setLogs((prev) => [
               ...prev,
-              { type: "info", message: "🎉 " + (data.message || "Goal completed successfully!") },
+              { type: "info", message: msg.startsWith("🎉") || msg.startsWith("⚠️") ? msg : `🎉 ${msg}` },
             ]);
           } else {
             setAgentStatus("error");
             setLogs((prev) => [
               ...prev,
-              { type: "error", message: "❌ " + (data.message || "Execution failed.") },
+              { type: "error", message: msg.startsWith("❌") ? msg : `❌ ${msg}` },
             ]);
           }
         }
@@ -226,6 +261,12 @@ export function App() {
       setLogs((prev) => [...prev, { type: "info", message: "Agent stopped by user." }]);
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  const handleSendInteraction = (interaction: any) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ action: "interact", ...interaction }));
     }
   };
 
@@ -294,6 +335,7 @@ export function App() {
             onStopRun={handleStopRun}
             onClearRun={handleClearRun}
             onNavigateHome={() => setActiveTab("home")}
+            onSendInteraction={handleSendInteraction}
           />
         )}
         {activeTab === "dashboard" && <DashboardView />}

@@ -4,8 +4,11 @@ echo ====================================================
 echo   Starting Autonomous Fast Browser Agent (React UI)
 echo ====================================================
 
+echo Freeing port 8000 if in use...
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000" ^| findstr "LISTENING"') do taskkill /f /pid %%a >nul 2>&1
+
 echo [1/2] Launching FastAPI Backend on http://127.0.0.1:8000...
-start "FastAPI Backend" cmd /k "cd /d %~dp0backend && ..\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --reload"
+start "FastAPI Backend" cmd /k "cd /d %~dp0backend && ..\.venv\Scripts\python -m uvicorn server:app --port 8000 --host 127.0.0.1 --loop asyncio"
 
 timeout /t 2 /nobreak >nul
 

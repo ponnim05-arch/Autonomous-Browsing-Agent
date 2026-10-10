@@ -47,6 +47,7 @@ interface AgentViewProps {
   onStopRun: () => void;
   onClearRun: () => void;
   onNavigateHome: () => void;
+  onSendInteraction?: (interaction: any) => void;
 }
 
 interface RelatedVideo {
@@ -77,9 +78,11 @@ export const AgentView: React.FC<AgentViewProps> = ({
   onStopRun,
   onClearRun,
   onNavigateHome,
+  onSendInteraction,
 }) => {
   const { theme } = useTheme();
-  const [viewMode, setViewMode] = useState<"video" | "snapshot">("video");
+  const [viewMode, setViewMode] = useState<"viewport" | "video">("viewport");
+  const [interactiveMode, setInteractiveMode] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [zoomImage, setZoomImage] = useState<string | null>(null);
   const [relatedVideos, setRelatedVideos] = useState<RelatedVideo[]>([]);
@@ -88,6 +91,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
   const [imgError, setImgError] = useState(false);
 
   const openedTabUrlRef = useRef<string | null>(null);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
 
   // Helper to extract YouTube video ID
   const extractYouTubeId = (url: string | null): string | null => {
@@ -101,17 +105,22 @@ export const AgentView: React.FC<AgentViewProps> = ({
   const effectiveUrl = activePreviewUrl || currentUrl;
   const youtubeVideoId = extractYouTubeId(effectiveUrl);
 
-  // Auto-switch to video mode when a YouTube URL is present
+  // Keep user in viewport mode so live browser actions are visible live
   useEffect(() => {
-    if (youtubeVideoId) {
-      setViewMode("video");
-    }
+    // No-op auto switch: live browser stays in front throughout execution
   }, [youtubeVideoId]);
 
   // Reset image error state on new screenshot
   useEffect(() => {
     setImgError(false);
   }, [currentScreenshot]);
+
+  // Auto-scroll event log to bottom when new entries arrive
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs]);
 
   // Re-fetch related videos whenever the goal or runId changes
   useEffect(() => {
@@ -149,9 +158,12 @@ export const AgentView: React.FC<AgentViewProps> = ({
     }
   }, [status, currentUrl, currentStepIndex, totalSteps]);
 
+  const effectiveTotalSteps = totalSteps || steps.length || 0;
   const progressPercent =
-    totalSteps > 0
-      ? Math.min(100, Math.round(((currentStepIndex + 1) / totalSteps) * 100))
+    status === "completed"
+      ? 100
+      : effectiveTotalSteps > 0
+      ? Math.min(100, Math.round(((currentStepIndex + (status === "running" ? 0.5 : 1)) / effectiveTotalSteps) * 100))
       : 0;
 
   const handleCopyUrl = () => {
@@ -234,17 +246,31 @@ export const AgentView: React.FC<AgentViewProps> = ({
       </div>
 
       {/* Prominent Completion Notice with New Tab confirmation */}
-      {status === "completed" && effectiveUrl && (
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-2xl bg-gradient-to-r from-emerald-950/70 via-zinc-900 to-zinc-900 border border-emerald-500/40 p-4 shadow-xl">
+      {(status === "completed" || status === "error") && effectiveUrl && (
+        <div className={`flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 rounded-2xl border p-4 shadow-xl ${
+          status === "completed"
+            ? "bg-gradient-to-r from-emerald-950/70 via-zinc-900 to-zinc-900 border-emerald-500/40"
+            : "bg-gradient-to-r from-red-950/70 via-zinc-900 to-zinc-900 border-red-500/40"
+        }`}>
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-emerald-500 text-zinc-950 font-bold shadow-md shadow-emerald-500/30">
-              <CheckCircle className="h-5 w-5" />
+            <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl font-bold shadow-md ${
+              status === "completed"
+                ? "bg-emerald-500 text-zinc-950 shadow-emerald-500/30"
+                : "bg-red-500 text-white shadow-red-500/30"
+            }`}>
+              {status === "completed" ? (
+                <CheckCircle className="h-5 w-5" />
+              ) : (
+                <AlertTriangle className="h-5 w-5" />
+              )}
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-bold text-white">Main Task Running in New Tab</h3>
-                <Badge variant="emerald" className="text-[10px]">
-                  Ready
+                <h3 className="text-sm font-bold text-white">
+                  {status === "completed" ? "Task Completed" : "Task Encountered Issues"}
+                </h3>
+                <Badge variant={status === "completed" ? "emerald" : "destructive"} className="text-[10px]">
+                  {status === "completed" ? "Ready" : "Needs Review"}
                 </Badge>
               </div>
               <p className="text-xs text-zinc-300 line-clamp-1 mt-0.5">
@@ -257,9 +283,13 @@ export const AgentView: React.FC<AgentViewProps> = ({
               variant="secondary"
               size="sm"
               onClick={() => handleOpenNewTab()}
-              className="gap-1.5 text-xs text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/10"
+              className={`gap-1.5 text-xs border ${
+                status === "completed"
+                  ? "text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/10"
+                  : "text-red-300 border-red-500/30 hover:bg-red-500/10"
+              }`}
             >
-              <span>Switch / Re-open Tab</span>
+              <span>Open in New Tab</span>
               <ExternalLink className="h-3.5 w-3.5" />
             </Button>
           </div>
@@ -280,7 +310,11 @@ export const AgentView: React.FC<AgentViewProps> = ({
                     <span>Execution Progress</span>
                   </CardTitle>
                   <span className="text-xs font-mono text-emerald-400 font-bold">
-                    {totalSteps > 0 ? `${currentStepIndex + 1} / ${totalSteps}` : "Preparing..."}
+                    {status === "completed"
+                      ? `${effectiveTotalSteps || 1} / ${effectiveTotalSteps || 1} (Done)`
+                      : effectiveTotalSteps > 0
+                      ? `${Math.min(currentStepIndex + 1, effectiveTotalSteps)} / ${effectiveTotalSteps}`
+                      : "Preparing..."}
                   </span>
                 </div>
                 {/* Progress Bar */}
@@ -336,8 +370,24 @@ export const AgentView: React.FC<AgentViewProps> = ({
                         </div>
                       );
                     })
+                  ) : status === "completed" ? (
+                    <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-2.5 text-xs text-white">
+                      <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md font-mono text-[10px] bg-emerald-500 text-zinc-950 font-bold">
+                        ✓
+                      </div>
+                      <div className="flex-1 truncate">
+                        <span className="font-semibold uppercase tracking-wider text-[10px] mr-2">
+                          VERIFY
+                        </span>
+                        <span className="text-zinc-300">
+                          {pageTitle || "Goal executed and verified successfully"}
+                        </span>
+                      </div>
+                    </div>
                   ) : (
-                    <p className="text-xs text-zinc-500 italic py-2">No step trace queued yet.</p>
+                    <p className="text-xs text-zinc-500 italic py-2">
+                      {status === "running" ? "Generating step trace..." : "No step trace queued yet."}
+                    </p>
                   )}
                 </div>
               </CardContent>
@@ -355,24 +405,27 @@ export const AgentView: React.FC<AgentViewProps> = ({
             <CardContent>
               <div className="h-72 overflow-y-auto rounded-xl bg-zinc-950/90 p-3 font-mono text-[11px] space-y-2 border border-white/5">
                 {logs.length > 0 ? (
-                  logs.map((log, idx) => (
-                    <div key={idx} className="leading-relaxed flex gap-2">
-                      <span className="text-zinc-600 shrink-0 select-none">&gt;</span>
-                      <span
-                        className={
-                          log.type === "error"
-                            ? "text-red-400"
-                            : log.type === "step"
-                            ? "text-emerald-400 font-semibold"
-                            : log.type === "repair"
-                            ? "text-amber-400"
-                            : "text-zinc-300"
-                        }
-                      >
-                        {log.message}
-                      </span>
-                    </div>
-                  ))
+                  <>
+                    {logs.map((log, idx) => (
+                      <div key={idx} className="leading-relaxed flex gap-2">
+                        <span className="text-zinc-600 shrink-0 select-none">&gt;</span>
+                        <span
+                          className={
+                            log.type === "error"
+                              ? "text-red-400"
+                              : log.type === "step"
+                              ? "text-emerald-400 font-semibold"
+                              : log.type === "repair"
+                              ? "text-amber-400"
+                              : "text-zinc-300"
+                          }
+                        >
+                          {log.message}
+                        </span>
+                      </div>
+                    ))}
+                    <div ref={logEndRef} />
+                  </>
                 ) : (
                   <div className="flex h-full items-center justify-center text-zinc-600">
                     Listening for browser executor events...
@@ -390,14 +443,48 @@ export const AgentView: React.FC<AgentViewProps> = ({
             {/* Browser Window Header & Address Bar */}
             <div className="border-b border-white/5 bg-zinc-950/95 px-4 py-3 space-y-2">
               <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-1.5">
-                  <span className="h-3 w-3 rounded-full bg-red-500/80 inline-block" />
-                  <span className="h-3 w-3 rounded-full bg-amber-500/80 inline-block" />
-                  <span className="h-3 w-3 rounded-full bg-emerald-500/80 inline-block" />
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 mr-1">
+                    <span className="h-3 w-3 rounded-full bg-red-500/80 inline-block" />
+                    <span className="h-3 w-3 rounded-full bg-amber-500/80 inline-block" />
+                    <span className="h-3 w-3 rounded-full bg-emerald-500/80 inline-block" />
+                  </div>
+                  {/* Real-Time Live Status Pill */}
+                  <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-zinc-900 border border-white/10 text-[10px] font-mono">
+                    <span className={`h-2 w-2 rounded-full ${status === "running" ? "bg-emerald-400 animate-pulse" : status === "completed" ? "bg-cyan-400" : "bg-zinc-600"}`} />
+                    <span className={status === "running" ? "text-emerald-400 font-semibold" : "text-zinc-400"}>
+                      {status === "running" ? "LIVE STREAM" : "VIEWPORT"}
+                    </span>
+                  </div>
+
+                  {status === "running" && onSendInteraction && (
+                    <button
+                      onClick={() => setInteractiveMode(!interactiveMode)}
+                      className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[10px] font-medium transition-all ${
+                        interactiveMode
+                          ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
+                          : "bg-zinc-900 text-zinc-400 hover:text-white border border-white/10"
+                      }`}
+                      title="Directly click and scroll the remote Playwright browser"
+                    >
+                      <span>🎮 Remote Control: {interactiveMode ? "ON" : "OFF"}</span>
+                    </button>
+                  )}
                 </div>
 
                 {/* Mode Selector Tabs */}
                 <div className="flex items-center bg-zinc-900 border border-white/5 rounded-lg p-0.5 text-xs">
+                  <button
+                    onClick={() => setViewMode("viewport")}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all font-medium ${
+                      viewMode === "viewport"
+                        ? "bg-emerald-500 text-zinc-950 font-bold shadow-sm"
+                        : "text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    <ImageIcon className="h-3 w-3" />
+                    <span>Live Viewport</span>
+                  </button>
                   {youtubeVideoId && (
                     <button
                       onClick={() => setViewMode("video")}
@@ -411,17 +498,6 @@ export const AgentView: React.FC<AgentViewProps> = ({
                       <span>Video Player</span>
                     </button>
                   )}
-                  <button
-                    onClick={() => setViewMode("snapshot")}
-                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all font-medium ${
-                      viewMode === "snapshot" || !youtubeVideoId
-                        ? "bg-emerald-500 text-zinc-950 font-bold shadow-sm"
-                        : "text-zinc-400 hover:text-white"
-                    }`}
-                  >
-                    <ImageIcon className="h-3 w-3" />
-                    <span>Viewport Capture</span>
-                  </button>
                 </div>
 
                 <div className="flex items-center gap-2">
@@ -497,23 +573,44 @@ export const AgentView: React.FC<AgentViewProps> = ({
                 </div>
               ) : null}
 
-              {/* Viewport Capture Mode (High-Res Browser Screenshot) */}
-              {(viewMode === "snapshot" || (!youtubeVideoId && viewMode === "video")) && (
-                <div className="relative w-full h-full min-h-[440px] flex items-center justify-center p-3">
+              {/* Viewport Capture Mode (Live Real-Time Browser Stream) */}
+              {(viewMode === "viewport" || !youtubeVideoId) && (
+                <div className="relative w-full h-full min-h-[440px] flex items-center justify-center p-2">
                   {currentScreenshot && !imgError ? (
-                    <div className="relative w-full h-full flex items-center justify-center">
+                    <div className="relative w-full h-full flex flex-col items-center justify-center">
+                      {interactiveMode && (
+                        <div className="absolute top-2 left-2 z-10 rounded-md bg-amber-500/90 text-zinc-950 px-2 py-0.5 text-[10px] font-bold shadow-md flex items-center gap-1">
+                          <span>🎮 Click or scroll on viewport to control</span>
+                        </div>
+                      )}
                       <img
                         src={currentScreenshot}
                         alt="Live Browser Viewport"
-                        className="w-full h-auto object-contain max-h-[520px] rounded-lg shadow-xl animate-in fade-in-50 duration-200 border border-white/5 cursor-zoom-in"
-                        onClick={() => setZoomImage(currentScreenshot)}
+                        className={`w-full h-auto object-contain max-h-[520px] rounded-lg shadow-xl border border-white/5 transition-opacity ${
+                          interactiveMode ? "cursor-crosshair ring-2 ring-amber-500/50" : "cursor-zoom-in"
+                        }`}
+                        onClick={(e) => {
+                          if (interactiveMode && onSendInteraction) {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            const x = Math.round(((e.clientX - rect.left) / rect.width) * 1366);
+                            const y = Math.round(((e.clientY - rect.top) / rect.height) * 768);
+                            onSendInteraction({ type: "click", x, y });
+                          } else {
+                            setZoomImage(currentScreenshot);
+                          }
+                        }}
+                        onWheel={(e) => {
+                          if (interactiveMode && onSendInteraction) {
+                            onSendInteraction({ type: "scroll", deltaY: e.deltaY, deltaX: e.deltaX });
+                          }
+                        }}
                         onError={() => setImgError(true)}
                       />
                       {pageTitle && (
-                        <div className="absolute bottom-3 left-3 right-3 rounded-xl bg-zinc-950/90 backdrop-blur-md p-2.5 text-xs text-white border border-white/10 flex items-center justify-between shadow-lg">
+                        <div className="absolute bottom-2 left-2 right-2 rounded-xl bg-zinc-950/90 backdrop-blur-md p-2 text-xs text-white border border-white/10 flex items-center justify-between shadow-lg">
                           <span className="truncate font-medium">{pageTitle}</span>
                           <Badge variant="secondary" className="text-[10px] shrink-0 font-mono">
-                            Page Loaded
+                            {status === "running" ? "Streaming Live" : "Page Loaded"}
                           </Badge>
                         </div>
                       )}
@@ -521,7 +618,7 @@ export const AgentView: React.FC<AgentViewProps> = ({
                   ) : imgError ? (
                     <div className="flex flex-col items-center justify-center p-8 text-center space-y-3 text-zinc-400">
                       <AlertTriangle className="h-10 w-10 text-amber-400" />
-                      <p className="text-xs">Live screenshot is updating or temporarily unavailable.</p>
+                      <p className="text-xs">Live stream frame is updating or temporarily unavailable.</p>
                       {effectiveUrl && (
                         <Button
                           variant="secondary"
@@ -535,13 +632,25 @@ export const AgentView: React.FC<AgentViewProps> = ({
                       )}
                     </div>
                   ) : (
-                    <div className="flex flex-col items-center justify-center p-12 text-center space-y-3 text-zinc-500">
-                      <Globe className="h-12 w-12 text-zinc-700 animate-pulse" />
-                      <p className="text-sm">
-                        {status === "running"
-                          ? "Capturing live browser viewport..."
-                          : "Start a task to launch and observe the live browser viewport."}
-                      </p>
+                    <div className="flex flex-col items-center justify-center p-12 text-center space-y-4 text-zinc-400">
+                      <div className="relative">
+                        <Globe className={`h-12 w-12 ${status === "running" ? "text-emerald-400 animate-spin" : "text-zinc-700"}`} />
+                        {status === "running" && (
+                          <span className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-emerald-500 animate-ping" />
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-white">
+                          {status === "running"
+                            ? "Connecting to Live Browser Stream..."
+                            : "Start a task to launch and observe the live browser viewport."}
+                        </p>
+                        {status === "running" && (
+                          <p className="text-xs text-zinc-500 max-w-sm">
+                            Chromium headless instance active with real-time CDP screencast pipeline.
+                          </p>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>

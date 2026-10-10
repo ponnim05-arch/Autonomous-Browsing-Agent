@@ -17,6 +17,7 @@ supabase>=2.0.0
 
 # ── Web Server & APIs ─────────────────────────────────────────────
 fastapi>=0.111.0
+starlette>=0.37.0,<1.0.0
 uvicorn>=0.30.0
 websockets>=12.0
 

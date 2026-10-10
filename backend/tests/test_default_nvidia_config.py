@@ -1,14 +1,13 @@
 import os
 from unittest.mock import patch
-from agent_framework.config import AgentConfig, DEFAULT_NVIDIA_API_KEY
+from agent_framework.config import AgentConfig
 
 
 def test_default_nvidia_api_key_fallback():
-    # When no NVIDIA_API_KEY is in environment, fallback to DEFAULT_NVIDIA_API_KEY
-    with patch.dict(os.environ, {}, clear=True):
+    # When no NVIDIA_API_KEY is in environment and no .env file, defaults securely to empty string
+    with patch("agent_framework.config._reload_env"), patch.dict(os.environ, {}, clear=True):
         config = AgentConfig()
-        assert config.nvidia_api_key == DEFAULT_NVIDIA_API_KEY
-        assert config.nvidia_api_key.startswith("nvapi-")
+        assert config.nvidia_api_key == ""
 
 
 def test_custom_nvidia_api_key_override():

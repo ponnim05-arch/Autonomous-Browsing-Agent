@@ -9,11 +9,32 @@ frozen dataclass so it stays immutable after construction.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import load_dotenv
 
-DEFAULT_NVIDIA_API_KEY: str = "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"
+
+def _is_server_environment() -> bool:
+    """Detect if running on a headless Linux server (Render, Docker, CI).
+
+    On these environments, launching a headed browser causes the XServer
+    error.  The visible-browser experience is delivered by streaming
+    screenshots to the frontend, not by running a headed process.
+    """
+    # Explicit opt-in via env var (set in render.yaml)
+    if os.getenv("RENDER") or os.getenv("IS_SERVER", "").lower() in ("1", "true"):
+        return True
+    # Linux without a display server
+    if sys.platform.startswith("linux") and not os.getenv("DISPLAY"):
+        return True
+    # Docker container heuristic
+    if os.path.exists("/.dockerenv"):
+        return True
+    return False
+
+
+IS_SERVER = _is_server_environment()
 
 ENV_PATH_BACKEND = Path(__file__).resolve().parents[2] / ".env"
 ENV_PATH_ROOT = Path(__file__).resolve().parents[3] / ".env"
@@ -109,7 +130,12 @@ class AgentConfig:
     )
 
     def __post_init__(self):
-        """Derive headless and browser_connection_mode from browser_mode for consistency."""
+        """Derive headless and browser_connection_mode from browser_mode for consistency.
+
+        On server environments (Render, Docker, Linux without DISPLAY), headless
+        is forced True regardless of browser_mode to prevent XServer errors.
+        The frontend viewport still shows the browser via screenshot streaming.
+        """
         mode = self.browser_mode.lower()
         if mode == "visible":
             self.headless = False
@@ -122,6 +148,16 @@ class AgentConfig:
             self.browser_connection_mode = "cdp"
         # If browser_mode is not one of the above, fall back to
         # whatever HEADLESS / BROWSER_CONNECTION_MODE env vars provide.
+
+        # Server override: force headless on Linux servers to avoid XServer error.
+        # The visible browser experience is achieved by streaming screenshots.
+        if IS_SERVER:
+            self.headless = True
+            if mode != "cdp":
+                self.browser_connection_mode = "playwright"
+            # Default to bundled chromium on servers (Edge/Chrome not available)
+            if self.browser_type in ("msedge", "edge", "chrome", "google-chrome"):
+                self.browser_type = "chromium"
 
     # ── Safety ─────────────────────────────────────────────────────
     # PA mode: allow cart/checkout — only block final payment submission
@@ -153,7 +189,7 @@ class AgentConfig:
     @property
     def nvidia_api_key(self) -> str:
         _reload_env()
-        return os.getenv("NVIDIA_API_KEY") or DEFAULT_NVIDIA_API_KEY
+        return os.getenv("NVIDIA_API_KEY", "")
 
     @property
     def nvidia_base_url(self) -> str:

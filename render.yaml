@@ -22,6 +22,8 @@ services:
         value: headless
       - key: HEADLESS
         value: "true"
+      - key: IS_SERVER
+        value: "true"
       - key: BROWSER_TYPE
         value: chromium
       - key: KEEP_BROWSER_OPEN

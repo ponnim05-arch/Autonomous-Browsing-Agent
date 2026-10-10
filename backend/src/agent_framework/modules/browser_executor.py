@@ -20,6 +20,7 @@ Pipeline position: ActionObject[] -> raw page state (dict)
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import logging
 import re
@@ -120,10 +121,12 @@ class BrowserExecutor:
         config: AgentConfig = default_config,
         status_callback: Optional[Callable[[str, str, Optional[str]], None]] = None,
         reuse_session: Optional[bool] = None,
+        frame_callback: Optional[Callable[[dict[str, Any]], None]] = None,
         **kwargs: Any,
     ):
         self.config = config
         self._status_callback = status_callback
+        self._frame_callback = frame_callback
         if reuse_session is None and "reuse_session" in kwargs:
             reuse_session = kwargs["reuse_session"]
         self.reuse_session = (
@@ -138,11 +141,17 @@ class BrowserExecutor:
         self._is_started = False
         self._is_cdp = False
         self._reused_shared_session = False
+        self._cdp_session: Any = None
+        self._cdp_page: Any = None
+        self._screencast_active: bool = False
+        self._fallback_sampler_task: Optional[asyncio.Task] = None
+        self._last_frame_time: float = 0.0
+        self._current_step_index: int = 0
         # Selector cache: description → CSS selector
         self._selector_cache: dict[str, str] = {}
         self._last_extracted_items: list[dict[str, Any]] = []
 
-    # ── Status Callback ────────────────────────────────────────────────────────
+    # ── Status & Frame Callbacks ────────────────────────────────────────────────
 
     def _emit_status(self, event: str, message: str, url: Optional[str] = None) -> None:
         """Fire the status callback if one is registered."""
@@ -152,6 +161,179 @@ class BrowserExecutor:
             except Exception:
                 pass  # Never let callback errors disrupt execution
         logger.info(f"[M5] Status: [{event}] {message}" + (f" ({url})" if url else ""))
+
+    def _emit_frame(self, b64_data: str, url: str = "", title: str = "") -> None:
+        """Forward real-time viewport frame to frame_callback."""
+        if not self._frame_callback:
+            return
+        frame_url = url or self.current_url
+        if b64_data and not b64_data.startswith("data:image"):
+            b64_data = f"data:image/jpeg;base64,{b64_data}"
+        payload = {
+            "frame": b64_data,
+            "url": frame_url,
+            "title": title or self.current_title,
+            "step_index": self._current_step_index,
+            "timestamp": time.time(),
+        }
+        try:
+            self._frame_callback(payload)
+        except Exception as e:
+            logger.debug(f"[M5] Error in frame callback: {e}")
+
+    async def _start_screencast(self, page: Any) -> None:
+        """Start real-time CDP screencast or fallback frame sampler on page."""
+        if not page or page.is_closed():
+            return
+        await self._stop_screencast()
+
+        # Try CDP Screencast first (Chromium native compositor streaming)
+        if hasattr(page.context, "new_cdp_session"):
+            try:
+                cdp = await page.context.new_cdp_session(page)
+                self._cdp_session = cdp
+                self._cdp_page = page
+                self._screencast_active = True
+
+                async def _on_frame(params: dict[str, Any]):
+                    try:
+                        session_id = params.get("sessionId")
+                        if session_id and self._cdp_session:
+                            try:
+                                await self._cdp_session.send("Page.screencastFrameAck", {"sessionId": session_id})
+                            except Exception:
+                                pass
+
+                        # Throttle to max ~10 FPS (100ms) to conserve network and CPU
+                        now = time.time()
+                        if now - self._last_frame_time < 0.10:
+                            return
+                        self._last_frame_time = now
+
+                        b64 = params.get("data")
+                        if b64:
+                            p_url = page.url or ""
+                            p_title = ""
+                            try:
+                                p_title = await page.title()
+                            except Exception:
+                                pass
+                            self._emit_frame(b64, p_url, p_title)
+                    except Exception as err:
+                        logger.debug(f"[M5] Frame processing exception: {err}")
+
+                on_res = cdp.on("Page.screencastFrame", _on_frame)
+                if inspect.isawaitable(on_res):
+                    await on_res
+                await cdp.send("Page.startScreencast", {
+                    "format": "jpeg",
+                    "quality": 65,
+                    "maxWidth": 1280,
+                    "maxHeight": 800,
+                    "everyNthFrame": 1,
+                })
+                logger.info("[M5] Native CDP screencast started for real-time viewport streaming.")
+                return
+            except Exception as cdp_err:
+                logger.info(f"[M5] CDP screencast setup skipped/failed ({cdp_err}). Using resilient frame sampler.")
+
+        # Resilient fallback sampler for non-CDP browsers
+        self._screencast_active = True
+        self._fallback_sampler_task = asyncio.create_task(self._frame_sampler_loop(page))
+
+    async def _frame_sampler_loop(self, page: Any) -> None:
+        """Fallback sampler capturing frames every 200ms."""
+        while self._screencast_active and self._is_started:
+            try:
+                if not page or page.is_closed():
+                    break
+                sc_bytes = await page.screenshot(type="jpeg", quality=65, timeout=1200)
+                b64 = base64.b64encode(sc_bytes).decode("utf-8")
+                p_url = page.url or ""
+                p_title = ""
+                try:
+                    p_title = await page.title()
+                except Exception:
+                    pass
+                self._emit_frame(b64, p_url, p_title)
+            except Exception:
+                pass
+            await asyncio.sleep(0.20)
+
+    async def _stop_screencast(self) -> None:
+        """Stop screencast and cancel any fallback sampler."""
+        self._screencast_active = False
+        if self._cdp_session:
+            try:
+                await self._cdp_session.send("Page.stopScreencast")
+            except Exception:
+                pass
+            try:
+                await self._cdp_session.detach()
+            except Exception:
+                pass
+            self._cdp_session = None
+            self._cdp_page = None
+        if self._fallback_sampler_task and not self._fallback_sampler_task.done():
+            self._fallback_sampler_task.cancel()
+            self._fallback_sampler_task = None
+
+    async def _capture_and_emit_immediate_frame(self, action_hint: str = "") -> None:
+        """Capture and emit an immediate high-priority frame (e.g. right after navigation or action)."""
+        try:
+            page = self._page
+            if page and not page.is_closed():
+                sc_bytes = await page.screenshot(type="jpeg", quality=65, timeout=2000)
+                b64 = base64.b64encode(sc_bytes).decode("utf-8")
+                url = page.url or ""
+                title = ""
+                try:
+                    title = await page.title()
+                except Exception:
+                    pass
+                self._emit_frame(b64, url, title)
+        except Exception:
+            pass
+
+    async def handle_interaction(self, action_type: str, data: dict[str, Any]) -> None:
+        """Handle live remote user interaction forwarded from the frontend viewport."""
+        try:
+            page = self._page
+            if not page or page.is_closed():
+                return
+            if action_type == "click":
+                x = data.get("x")
+                y = data.get("y")
+                if x is not None and y is not None:
+                    await page.mouse.click(float(x), float(y))
+                    await self._capture_and_emit_immediate_frame("User Click")
+            elif action_type == "scroll":
+                delta_y = data.get("deltaY", 100)
+                delta_x = data.get("deltaX", 0)
+                await page.mouse.wheel(float(delta_x), float(delta_y))
+            elif action_type == "type":
+                text = data.get("text", "")
+                if text:
+                    await page.keyboard.type(text)
+                    await self._capture_and_emit_immediate_frame("User Type")
+            elif action_type == "key":
+                key = data.get("key", "")
+                if key:
+                    await page.keyboard.press(key)
+                    await self._capture_and_emit_immediate_frame("User Key")
+        except Exception as e:
+            logger.debug(f"[M5] Error handling remote interaction: {e}")
+
+    async def _handle_new_tab(self, new_p: Any) -> None:
+        """Switch active page and live screencast when a new tab/popup opens."""
+        try:
+            logger.info(f"[M5] New tab opened: {new_p.url}. Keeping active page updated.")
+            self._page = new_p
+            BrowserExecutor._shared_page = new_p
+            await self._start_screencast(new_p)
+            await self._capture_and_emit_immediate_frame("New Tab")
+        except Exception as e:
+            logger.debug(f"[M5] Error attaching to new tab: {e}")
 
     # ── Properties ─────────────────────────────────────────────────────────────
 
@@ -343,9 +525,13 @@ class BrowserExecutor:
 
                     self._is_started = True
                     self._reused_shared_session = True
+                    await self._start_screencast(self._page)
+                    await self._capture_and_emit_immediate_frame("Browser Session Ready")
                     self._emit_status("browser_started", f"📑 Opened new tab in browser window (mode={browser_mode})")
                     logger.info("[M5] Successfully opened new tab in existing browser window session.")
                     return
+                else:
+                    await BrowserExecutor.close_shared_session()
             except Exception as e:
                 logger.warning(f"[M5] Could not attach to shared browser: {e}. Launching fresh instance...")
                 await BrowserExecutor.close_shared_session()
@@ -365,6 +551,13 @@ class BrowserExecutor:
             self._emit_status("browser_starting", f"🌐 Starting browser (mode={browser_mode}, type={self.config.browser_type})...")
 
             try:
+                if self._playwright:
+                    try:
+                        await self._playwright.stop()
+                    except Exception:
+                        pass
+                    self._playwright = None
+
                 self._playwright = await async_playwright().start()
 
                 if connection_mode == "cdp":
@@ -379,6 +572,8 @@ class BrowserExecutor:
                     BrowserExecutor._shared_page = self._page
 
                 self._is_started = True
+                await self._start_screencast(self._page)
+                await self._capture_and_emit_immediate_frame("Browser Session Ready")
                 self._emit_status("browser_started", f"✅ Browser started (mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})")
                 logger.info(
                     f"[M5] BrowserExecutor ready (mode={connection_mode}, browser_mode={browser_mode}, type={self.config.browser_type}, headless={self.config.headless})"
@@ -551,8 +746,7 @@ class BrowserExecutor:
         # Auto-track and focus any new tabs that are opened
         def _handle_new_tab(new_p):
             logger.info(f"[M5] New tab opened: {new_p.url}. Keeping active page updated.")
-            self._page = new_p
-            BrowserExecutor._shared_page = new_p
+            asyncio.create_task(self._handle_new_tab(new_p))
 
         try:
             res = self._context.on("page", _handle_new_tab)
@@ -572,29 +766,40 @@ class BrowserExecutor:
         """
         Resilient browser launcher with clean fallback cascade:
         1. Requested browser / channel
-        2. System Edge (channel='msedge')
-        3. System Chrome (channel='chrome')
+        2. System Edge (channel='msedge')  — skipped on Linux servers
+        3. System Chrome (channel='chrome') — skipped on Linux servers
         4. Playwright bundled Chromium
         """
+        from ..config import IS_SERVER
+
         launch_attempts = []
+        is_linux = sys.platform.startswith("linux")
+
+        # On Linux servers (Render, Docker), Edge and Chrome desktop channels
+        # are not available. Trying them wastes time and produces confusing
+        # errors ("Looks like you launched a headed browser without having
+        # an XServer running"). Skip directly to bundled Chromium.
+        skip_system_browsers = is_linux and IS_SERVER
 
         if b_type in ("msedge", "edge"):
-            launch_attempts.append(
-                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
-            )
-            launch_attempts.append(
-                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
-            )
+            if not skip_system_browsers:
+                launch_attempts.append(
+                    ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+                )
+                launch_attempts.append(
+                    ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+                )
             launch_attempts.append(
                 ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
         elif b_type in ("chrome", "google-chrome"):
-            launch_attempts.append(
-                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
-            )
-            launch_attempts.append(
-                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
-            )
+            if not skip_system_browsers:
+                launch_attempts.append(
+                    ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+                )
+                launch_attempts.append(
+                    ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+                )
             launch_attempts.append(
                 ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
@@ -604,25 +809,29 @@ class BrowserExecutor:
                 launch_attempts.append(
                     (f"{b_type.capitalize()} (bundled)", lambda: launcher.launch(**launch_kwargs))
                 )
-            launch_attempts.append(
-                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
-            )
+            if not skip_system_browsers:
+                launch_attempts.append(
+                    ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+                )
             launch_attempts.append(
                 ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
         else:
-            # Default: prefer already-installed system browsers (Edge/Chrome) so
-            # no bundled Chromium download is required. Bundled Chromium is only
-            # used as a last-resort fallback.
-            launch_attempts.append(
-                ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
-            )
-            launch_attempts.append(
-                ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
-            )
+            # Default / "auto": on servers go straight to bundled Chromium;
+            # on desktop prefer already-installed system browsers first.
+            if not skip_system_browsers:
+                launch_attempts.append(
+                    ("System Edge (channel='msedge')", lambda: self._playwright.chromium.launch(channel="msedge", **launch_kwargs))
+                )
+                launch_attempts.append(
+                    ("System Chrome (channel='chrome')", lambda: self._playwright.chromium.launch(channel="chrome", **launch_kwargs))
+                )
             launch_attempts.append(
                 ("Bundled Chromium", lambda: self._playwright.chromium.launch(**launch_kwargs))
             )
+
+        if skip_system_browsers:
+            logger.info("[M5] Server environment detected — skipping Edge/Chrome channels, using bundled Chromium.")
 
         last_error = None
         attempted_names = []
@@ -641,6 +850,7 @@ class BrowserExecutor:
         diag = self.get_diagnostics(self.config)
         diag["attempted_launchers"] = attempted_names
         diag["last_error"] = str(last_error)
+        diag["is_server"] = IS_SERVER
 
         raise BrowserStartupError(
             f"Failed to launch browser '{b_type}' after trying: {', '.join(attempted_names)}. "
@@ -659,6 +869,7 @@ class BrowserExecutor:
         we have no healthy browser), we skip the keep-alive shortcut and do
         full cleanup to avoid leaving stale shared pointers that poison future runs.
         """
+        await self._stop_screencast()
         keep_open = getattr(self.config, "keep_browser_open", False)
 
         # Only keep the browser alive if it's actually healthy.
@@ -1090,9 +1301,10 @@ class BrowserExecutor:
             if el:
                 await self._update_in_page_hud(f"Selecting: {action.selector or 'element'}...", status_type="clicking")
                 await self._highlight_element(el)
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.15)
                 try:
                     await self._click_resiliently(el, timeout=timeout, force=(is_volume or is_play))
+                    await self._capture_and_emit_immediate_frame("Clicked")
                 except Exception as click_err:
                     if is_volume or is_play:
                         logger.info(f"[M5] Click on {action.selector} bypassed due to overlay ({click_err}), action fulfilled via video JS")
@@ -1163,15 +1375,17 @@ class BrowserExecutor:
                     pass
                 try:
                     await el.fill("")
-                    await el.press_sequentially(val, delay=45)
+                    await el.press_sequentially(val, delay=15)
                 except Exception:
                     await el.fill(val, timeout=timeout)
-                await asyncio.sleep(0.4)
+                await self._capture_and_emit_immediate_frame("Typed")
+                await asyncio.sleep(0.15)
                 # Auto-press Enter on search fields / queries to trigger instant website search
                 if act == "type" or any(k in sel_lower for k in ("search", "query", "box", "input", "find")):
                     try:
                         await self._update_in_page_hud(f"Submitted search: '{val}'", status_type="typing")
                         await el.press("Enter")
+                        await self._capture_and_emit_immediate_frame("Submitted Search")
                     except Exception:
                         pass
             else:
@@ -1200,10 +1414,12 @@ class BrowserExecutor:
                     else:
                         raise e2
             await self._update_in_page_hud(f"Opened: {page.url or url}", status_type="navigating")
-            await asyncio.sleep(0.6)
+            await self._capture_and_emit_immediate_frame("Navigated")
+            await asyncio.sleep(0.2)
 
         elif act == "scroll":
             await page.evaluate("window.scrollBy(0, window.innerHeight * 0.8)")
+            await self._capture_and_emit_immediate_frame("Scrolled")
 
         elif act == "extract":
             # Live in-page structured product and link extraction
@@ -1315,11 +1531,11 @@ class BrowserExecutor:
                 except Exception:
                     pass
             elif action.action in ("type", "fill"):
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.15)
             elif action.action == "extract":
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
             elif action.action == "dismiss_popup":
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
         except Exception:
             pass  # Page might already be settled
 
@@ -1442,8 +1658,9 @@ class BrowserExecutor:
                     continue
 
         # 3. Semantic mapping for Search Query / Inputs
-        if any(k in sel_lower for k in ("search_query", "search_box", "search_input", "search query", "searchbox", "search bar", "search_field")):
+        if any(k in sel_lower for k in ("search_query", "search_box", "search_input", "search query", "searchbox", "search bar", "search_field", "search input")):
             search_input_selectors = [
+                "textarea[name='q']",
                 "#twotabsearchtextbox",
                 "input[name='field-keywords']",
                 "input[name='search_query']",
@@ -1453,6 +1670,8 @@ class BrowserExecutor:
                 "input[type='search']",
                 "input[placeholder*='search' i]",
                 "input[aria-label*='search' i]",
+                "textarea[aria-label*='search' i]",
+                "textarea[placeholder*='search' i]",
                 "input[type='text']",
                 "textarea[name='q']",
             ]
@@ -1824,7 +2043,30 @@ class BrowserExecutor:
                 except Exception:
                     continue
 
-        # 16. Try as direct CSS selector
+        # 16. Natural-language keyword decomposition
+        # If selector looks like natural language (contains spaces, no special chars),
+        # try to decompose it into role + name queries before falling back to raw CSS.
+        if ' ' in selector and not any(c in selector for c in ('>', '[', '#', '.', '=', ':', '(')):
+            keywords = [w for w in selector.split() if len(w) > 2]
+            # Try role-based matching with the full description first
+            for role in ("textbox", "searchbox", "button", "link", "combobox"):
+                try:
+                    el = page.get_by_role(role, name=selector).first
+                    await el.wait_for(state="visible", timeout=min(timeout, 1200))
+                    return el
+                except Exception:
+                    continue
+            # Try placeholder/label matching with individual keywords
+            for kw in keywords:
+                try:
+                    el = page.locator(f'[placeholder*="{kw}" i], [aria-label*="{kw}" i], input[name*="{kw}" i], textarea[name*="{kw}" i]').first
+                    await el.wait_for(state="visible", timeout=min(timeout, 1200))
+                    self._selector_cache[selector] = f'[placeholder*="{kw}" i]'
+                    return el
+                except Exception:
+                    continue
+
+        # 17. Try as direct CSS selector
         try:
             el = page.locator(selector).first
             await el.wait_for(state="visible", timeout=min(timeout, 2000))
@@ -1833,37 +2075,37 @@ class BrowserExecutor:
         except Exception:
             pass
 
-        # 6. Try aria-label
+        # 18. Try aria-label
         try:
             el = page.locator(f'[aria-label*="{selector}" i]').first
-            await el.wait_for(state="visible", timeout=min(timeout, 2000))
+            await el.wait_for(state="visible", timeout=min(timeout, 1500))
             self._selector_cache[selector] = f'[aria-label*="{selector}" i]'
             return el
         except Exception:
             pass
 
-        # 7. Try placeholder
+        # 19. Try placeholder
         try:
             el = page.locator(f'[placeholder*="{selector}" i]').first
-            await el.wait_for(state="visible", timeout=min(timeout, 2000))
+            await el.wait_for(state="visible", timeout=min(timeout, 1500))
             self._selector_cache[selector] = f'[placeholder*="{selector}" i]'
             return el
         except Exception:
             pass
 
-        # 8. Try text match
+        # 20. Try text match
         try:
             el = page.get_by_text(selector, exact=False).first
-            await el.wait_for(state="visible", timeout=min(timeout, 2000))
+            await el.wait_for(state="visible", timeout=min(timeout, 1500))
             return el
         except Exception:
             pass
 
-        # 9. Try role-based matching for common interactive roles
+        # 21. Try role-based matching for common interactive roles
         for role in ("button", "link", "textbox", "searchbox", "combobox"):
             try:
                 el = page.get_by_role(role, name=selector).first
-                await el.wait_for(state="visible", timeout=min(timeout, 1500))
+                await el.wait_for(state="visible", timeout=min(timeout, 1200))
                 return el
             except Exception:
                 continue

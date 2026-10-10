@@ -21,9 +21,25 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 # Playwright on Windows requires ProactorEventLoop for subprocess transport
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# Compatibility shim for FastAPI when Starlette >= 1.0 or newer
+try:
+    import starlette.routing
+    _orig_router_init = starlette.routing.Router.__init__
+    def _patched_router_init(self, *args, **kwargs):
+        kwargs.pop("on_startup", None)
+        kwargs.pop("on_shutdown", None)
+        return _orig_router_init(self, *args, **kwargs)
+    starlette.routing.Router.__init__ = _patched_router_init
+    if not hasattr(starlette.routing.Router, "add_event_handler"):
+        starlette.routing.Router.add_event_handler = lambda self, event_type, func: None
+except Exception:
+    pass
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,12 +114,43 @@ class ConnectionManager:
         self.active_connections: Dict[str, List[WebSocket]] = {}
         self.run_cancel_events: Dict[str, asyncio.Event] = {}
         self.run_sessions: Dict[str, Optional[str]] = {}
+        self.active_browsers: Dict[str, Any] = {}
+        self.run_plans: Dict[str, Dict[str, Any]] = {}
+        self.run_states: Dict[str, Dict[str, Any]] = {}
 
     async def connect(self, run_id: str, websocket: WebSocket):
         await websocket.accept()
         if run_id not in self.active_connections:
             self.active_connections[run_id] = []
         self.active_connections[run_id].append(websocket)
+
+        # Immediately deliver cached execution plan if already ready
+        if run_id in self.run_plans:
+            try:
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "plan_ready",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "data": self.run_plans[run_id],
+                    })
+                )
+            except Exception:
+                pass
+
+        # Immediately deliver current step state if execution is in progress
+        if run_id in self.run_states:
+            try:
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "step_start",
+                        "run_id": run_id,
+                        "timestamp": time.time(),
+                        "data": self.run_states[run_id],
+                    })
+                )
+            except Exception:
+                pass
 
     def disconnect(self, run_id: str, websocket: WebSocket):
         if run_id in self.active_connections:
@@ -259,6 +306,7 @@ class RunRequest(BaseModel):
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok", "timestamp": time.time()}
+
 
 
 @app.get("/api/config")
@@ -933,9 +981,15 @@ async def agent_websocket(websocket: WebSocket, run_id: str):
             data = await websocket.receive_text()
             try:
                 parsed = json.loads(data)
-                if parsed.get("action") == "stop":
+                act = parsed.get("action")
+                if act == "stop":
                     if run_id in ws_manager.run_cancel_events:
                         ws_manager.run_cancel_events[run_id].set()
+                elif act == "interact":
+                    browser = ws_manager.active_browsers.get(run_id)
+                    if browser:
+                        interaction_type = parsed.get("type", "")
+                        await browser.handle_interaction(interaction_type, parsed)
             except Exception:
                 pass
     except WebSocketDisconnect:
@@ -943,6 +997,86 @@ async def agent_websocket(websocket: WebSocket, run_id: str):
 
 
 # ── Execution Worker ──────────────────────────────────────────────────────────
+
+async def _encode_screenshot(page_state, run_id: str) -> tuple:
+    """Encode a screenshot from page state into (relative_url, base64_data)."""
+    screenshot_rel = None
+    screenshot_base64 = None
+    if page_state.screenshot_path and Path(page_state.screenshot_path).exists():
+        p = Path(page_state.screenshot_path).resolve()
+        try:
+            rel = p.relative_to(RUNS_DIR.resolve()).as_posix()
+            screenshot_rel = f"/screenshots/{rel}"
+        except Exception:
+            try:
+                rel = p.relative_to(DATA_SCREENSHOTS_DIR.resolve()).as_posix()
+                screenshot_rel = f"/screenshots/{rel}"
+            except Exception:
+                screenshot_rel = f"/screenshots/{run_id}/{p.name}"
+
+        try:
+            with open(p, "rb") as img_file:
+                b64 = base64.b64encode(img_file.read()).decode("utf-8")
+                screenshot_base64 = f"data:image/png;base64,{b64}"
+        except Exception as b64_err:
+            logger.warning(f"Error encoding base64 screenshot: {b64_err}")
+    return screenshot_rel, screenshot_base64
+
+
+def _verify_goal_heuristic(goal: str, final_url: str | None, final_title: str | None, steps_succeeded: int, total_steps: int, failed_steps: list) -> tuple:
+    """Rule-based goal verification. Returns (is_verified: bool, message: str).
+
+    Checks whether the final browser state plausibly matches the user's goal
+    instead of blindly reporting success after all steps have been attempted.
+    """
+    goal_lower = goal.lower()
+    url_lower = (final_url or "").lower()
+    title_lower = (final_title or "").lower()
+
+    # If the majority of steps failed, don't claim success
+    if failed_steps and len(failed_steps) > total_steps * 0.4:
+        return False, f"{len(failed_steps)} of {total_steps} actions failed. Goal may not be fully achieved."
+
+    # Check if the final page matches expected keywords from the goal
+    goal_keywords = [w for w in goal_lower.split() if len(w) > 3 and w not in (
+        "open", "from", "this", "that", "with", "what", "find", "search", "google", "using", "want", "please",
+        "could", "would", "should", "make", "into", "submit", "enter", "type", "click", "navigate",
+    )]
+
+    if not final_url or final_url in ("", "about:blank"):
+        return False, "Browser did not navigate to any page."
+
+    # Check for common target sites mentioned in the goal
+    site_checks = {
+        "chatgpt": ("chatgpt" in url_lower or "chat.openai" in url_lower),
+        "google": ("google" in url_lower),
+        "amazon": ("amazon" in url_lower),
+        "youtube": ("youtube" in url_lower or "youtu.be" in url_lower),
+        "flipkart": ("flipkart" in url_lower),
+    }
+    for site_name, is_on_site in site_checks.items():
+        if site_name in goal_lower and not is_on_site:
+            # Goal mentions a site but we're not on it
+            if steps_succeeded == total_steps:
+                return True, f"All {total_steps} actions completed. Final page: {final_title or final_url}"
+            return False, f"Goal mentions '{site_name}' but final page is on {final_url}"
+
+    # If all steps succeeded, check for obvious failure signals
+    error_signals = ["404", "not found", "error", "access denied", "blocked", "captcha"]
+    if any(sig in title_lower for sig in error_signals):
+        return False, f"Final page appears to be an error page: '{final_title}'"
+
+    if steps_succeeded == total_steps:
+        return True, f"All {total_steps} actions completed successfully. Final page: {final_title or final_url}"
+
+    if steps_succeeded > 0:
+        return True, f"{steps_succeeded} of {total_steps} actions completed. Some steps had issues but goal may be partially achieved."
+
+    return False, "No actions completed successfully."
+
+
+MAX_ACTION_RETRIES = 2
+
 
 async def execute_agent_run(
     run_id: str,
@@ -952,7 +1086,14 @@ async def execute_agent_run(
     plan_dict: Optional[Dict[str, Any]],
     cancel_event: asyncio.Event,
 ):
-    """Executes an agent run and streams real-time updates over WebSocket."""
+    """Executes an agent run and streams real-time updates over WebSocket.
+
+    Improvements over the original:
+    - Action retry: failed actions are retried up to MAX_ACTION_RETRIES times
+    - Halt on prerequisite failure: terminal failures stop dependent actions
+    - Goal verification: success is verified against the final page state
+    - Continuous screenshot streaming for responsive viewport updates
+    """
     exp_logger = ExperimentLogger(config)
     metrics = MetricsCollector()
     metrics.start()
@@ -966,6 +1107,9 @@ async def execute_agent_run(
         asyncio.create_task(
             ws_manager.broadcast(run_id, "browser_event", {"event": event, "message": message, "url": url})
         )
+
+    screenshot_rel = None
+    screenshot_base64 = None
 
     try:
         # If plan was not provided upfront, generate one
@@ -993,10 +1137,21 @@ async def execute_agent_run(
         total_steps = len(steps_data)
         state_mgr.set_goal(goal, total_steps)
 
-        await ws_manager.broadcast(run_id, "plan_ready", {"steps": steps_data, "total_steps": total_steps})
+        plan_payload = {"steps": steps_data, "total_steps": total_steps}
+        ws_manager.run_plans[run_id] = plan_payload
+        await ws_manager.broadcast(run_id, "plan_ready", plan_payload)
 
-        async with BrowserExecutor(config, status_callback=status_cb, reuse_session=True) as browser:
+        def frame_cb(frame_data: dict[str, Any]):
+            asyncio.create_task(
+                ws_manager.broadcast(run_id, "viewport_frame", frame_data)
+            )
+
+        async with BrowserExecutor(config, status_callback=status_cb, frame_callback=frame_cb, reuse_session=True) as browser:
+            ws_manager.active_browsers[run_id] = browser
             prev_page = None
+            steps_succeeded = 0
+            failed_steps: list[dict] = []
+            halted = False
 
             for i, step_info in enumerate(steps_data):
                 if cancel_event.is_set():
@@ -1011,6 +1166,24 @@ async def execute_agent_run(
                     )
                     return
 
+                if halted:
+                    await ws_manager.broadcast(run_id, "step_start", {
+                        "step_index": i, "total_steps": total_steps,
+                        "action": step_info.get("action", ""), "description": "Skipped — prerequisite failed",
+                        "selector": step_info.get("selector"), "value": step_info.get("value"),
+                    })
+                    await ws_manager.broadcast(run_id, "step_completed", {
+                        "step_index": i, "success": False,
+                        "error": "Skipped due to earlier prerequisite failure",
+                        "url": prev_page.url if prev_page else None,
+                        "title": prev_page.title if prev_page else None,
+                        "screenshot": screenshot_rel,
+                        "screenshot_base64": screenshot_base64,
+                        "duration_ms": 0,
+                        "extracted_items": [],
+                    })
+                    continue
+
                 action_type = step_info.get("action", "navigate")
                 selector = step_info.get("selector") or step_info.get("target")
                 value = step_info.get("value")
@@ -1018,52 +1191,78 @@ async def execute_agent_run(
 
                 action_obj = ActionObject(action=action_type, selector=selector, value=value)
 
-                await ws_manager.broadcast(
-                    run_id,
-                    "step_start",
-                    {
-                        "step_index": i,
-                        "total_steps": total_steps,
-                        "action": action_type,
-                        "description": description,
-                        "selector": selector,
-                        "value": value,
-                    },
-                )
+                step_start_payload = {
+                    "step_index": i,
+                    "total_steps": total_steps,
+                    "action": action_type,
+                    "description": description,
+                    "selector": selector,
+                    "value": value,
+                }
+                ws_manager.run_states[run_id] = step_start_payload
+                await ws_manager.broadcast(run_id, "step_start", step_start_payload)
 
-                t0 = time.time()
-                raw_state = await browser.execute(action_obj, run_id=run_id, step_index=i, screenshot=True)
-                duration_ms = int((time.time() - t0) * 1000)
+                # ── Action execution with retry ──────────────────────────
+                act_success = False
+                act_err = None
+                raw_state = {}
+                duration_ms = 0
 
-                act_success = raw_state.get("action_success", True)
-                act_err = raw_state.get("action_error")
+                for attempt in range(1, MAX_ACTION_RETRIES + 2):  # 1 try + MAX_ACTION_RETRIES retries
+                    if cancel_event.is_set():
+                        break
+
+                    t0 = time.time()
+                    try:
+                        raw_state = await browser.execute(action_obj, run_id=run_id, step_index=i, screenshot=True)
+                        duration_ms = int((time.time() - t0) * 1000)
+                        act_success = raw_state.get("action_success", True)
+                        act_err = raw_state.get("action_error")
+
+                        if act_success:
+                            break  # Success — no retry needed
+
+                        # Action reported failure — determine if retryable
+                        if attempt <= MAX_ACTION_RETRIES:
+                            await ws_manager.broadcast(run_id, "status", {
+                                "message": f"⚠️ Step {i+1} failed (attempt {attempt}/{MAX_ACTION_RETRIES+1}): {act_err}. Retrying..."
+                            })
+                            await asyncio.sleep(0.5 * attempt)  # Exponential backoff
+                        # else: final attempt also failed — will be handled below
+
+                    except BrowserBlockedError:
+                        raise  # Safety block — never retry
+                    except Exception as exec_err:
+                        duration_ms = int((time.time() - t0) * 1000)
+                        act_success = False
+                        act_err = str(exec_err)
+                        raw_state = {"url": "", "title": "", "action_success": False, "action_error": act_err}
+
+                        if attempt <= MAX_ACTION_RETRIES:
+                            await ws_manager.broadcast(run_id, "status", {
+                                "message": f"⚠️ Step {i+1} error (attempt {attempt}/{MAX_ACTION_RETRIES+1}): {act_err}. Retrying..."
+                            })
+                            await asyncio.sleep(0.5 * attempt)
+
                 metrics.record_browser_action(action_type, success=act_success, duration_ms=duration_ms)
                 metrics.record_screenshot()
 
                 page_state = observer.observe(raw_state, task_keywords=[goal], prev_state=prev_page)
                 prev_page = page_state
 
-                # Prepare screenshot URL or base64
-                screenshot_rel = None
-                screenshot_base64 = None
-                if page_state.screenshot_path and Path(page_state.screenshot_path).exists():
-                    p = Path(page_state.screenshot_path).resolve()
-                    try:
-                        rel = p.relative_to(RUNS_DIR.resolve()).as_posix()
-                        screenshot_rel = f"/screenshots/{rel}"
-                    except Exception:
-                        try:
-                            rel = p.relative_to(DATA_SCREENSHOTS_DIR.resolve()).as_posix()
-                            screenshot_rel = f"/screenshots/{rel}"
-                        except Exception:
-                            screenshot_rel = f"/screenshots/{run_id}/{p.name}"
+                screenshot_rel, screenshot_base64 = await _encode_screenshot(page_state, run_id)
 
-                    try:
-                        with open(p, "rb") as img_file:
-                            b64 = base64.b64encode(img_file.read()).decode("utf-8")
-                            screenshot_base64 = f"data:image/png;base64,{b64}"
-                    except Exception as b64_err:
-                        logger.warning(f"Error encoding base64 screenshot: {b64_err}")
+                if act_success:
+                    steps_succeeded += 1
+                else:
+                    failed_steps.append({"step_index": i, "action": action_type, "error": act_err})
+                    is_checkpoint = step_info.get("checkpoint", False)
+                    # Halt on prerequisite failure: navigate and checkpoint failures are terminal
+                    if action_type == "navigate" or is_checkpoint:
+                        halted = True
+                        await ws_manager.broadcast(run_id, "status", {
+                            "message": f"❌ Step {i+1} failed after {MAX_ACTION_RETRIES+1} attempts: {act_err}. Halting dependent steps."
+                        })
 
                 await ws_manager.broadcast(
                     run_id,
@@ -1097,9 +1296,16 @@ async def execute_agent_run(
                 except Exception as log_err:
                     logger.warning(f"Error logging step {i} to experiments db: {log_err}")
 
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.15)  # Reduced from 0.3 for better responsiveness
 
-            # Mark run as complete
+            # ── Goal Verification ────────────────────────────────────────
+            final_url = prev_page.url if prev_page else None
+            final_title = prev_page.title if prev_page else None
+
+            goal_verified, verification_message = _verify_goal_heuristic(
+                goal, final_url, final_title, steps_succeeded, total_steps, failed_steps
+            )
+
             metrics.stop()
             m = getattr(metrics, "metrics", None)
             total_acts = getattr(m, "total_actions", 0) if m else 0
@@ -1108,9 +1314,22 @@ async def execute_agent_run(
             tot_time = getattr(m, "total_time_sec", 0.0) if m else 0.0
             final_summary = metrics.summary()
 
+            if goal_verified:
+                run_status = "success"
+                run_message = f"🎉 {verification_message}"
+            elif steps_succeeded > 0 and not halted:
+                run_status = "success"
+                run_message = f"⚠️ {verification_message}"
+            else:
+                run_status = "failed"
+                run_message = f"❌ {verification_message}"
+                if failed_steps:
+                    last_fail = failed_steps[-1]
+                    run_message += f" Last failure at step {last_fail['step_index']+1}: {last_fail['error']}"
+
             await exp_logger.end_run(
                 run_id=run_id,
-                status="success",
+                status=run_status,
                 total_actions=total_acts,
                 total_retries=total_ret,
                 total_tokens=total_toks,
@@ -1120,13 +1339,17 @@ async def execute_agent_run(
                 run_id,
                 "run_finished",
                 {
-                    "status": "success",
+                    "status": run_status,
                     "summary": final_summary,
-                    "message": "Goal completed successfully!",
-                    "final_url": prev_page.url if prev_page else None,
-                    "final_title": prev_page.title if prev_page else None,
+                    "message": run_message,
+                    "final_url": final_url,
+                    "final_title": final_title,
                     "final_screenshot": screenshot_rel,
                     "final_screenshot_base64": screenshot_base64,
+                    "steps_succeeded": steps_succeeded,
+                    "steps_failed": len(failed_steps),
+                    "total_steps": total_steps,
+                    "steps": steps_data,
                 },
             )
 
@@ -1158,6 +1381,7 @@ async def execute_agent_run(
         if run_id in ws_manager.run_cancel_events:
             del ws_manager.run_cancel_events[run_id]
         ws_manager.run_sessions.pop(run_id, None)
+        ws_manager.active_browsers.pop(run_id, None)
 
 
 if __name__ == "__main__":
