@@ -28,6 +28,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlencode, urlparse
 
 try:
     from playwright.async_api import async_playwright
@@ -1361,6 +1362,30 @@ class BrowserExecutor:
 
         elif act in ("type", "fill"):
             val = action.value or ""
+            hostname = (urlparse(page.url or "").hostname or "").lower()
+            is_youtube_search = (
+                act == "fill"
+                and hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}
+                and any(
+                    keyword in sel_lower
+                    for keyword in ("search_query", "search_box", "search_input", "search query", "searchbox", "search bar", "search_field", "search input")
+                )
+            )
+            if is_youtube_search:
+                search_url = f"https://www.youtube.com/results?{urlencode({'search_query': val})}"
+                await self._update_in_page_hud(f"Searching YouTube for: '{val}'...", status_type="typing")
+                await page.goto(
+                    search_url,
+                    wait_until="domcontentloaded",
+                    timeout=min(timeout, self.config.page_load_timeout_ms),
+                )
+                await page.locator("a[href*='/watch']").first.wait_for(
+                    state="visible",
+                    timeout=timeout,
+                )
+                await self._capture_and_emit_immediate_frame("YouTube Search Results")
+                return
+
             await self._update_in_page_hud(f"Typing: '{val}'...", status_type="typing")
             el = await self._resolve_element(action.selector, timeout)
             if el:

@@ -328,7 +328,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
               {/* Browser Mode */}
               <div className="space-y-1.5">
                 <label className="text-zinc-400 font-medium">Browser Mode</label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className={`grid ${config?.browser_is_remote ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
                   <button
                     type="button"
                     onClick={() => setBrowserMode("visible")}
@@ -339,7 +339,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                     }`}
                   >
                     <Eye className="h-4 w-4 mb-1" />
-                    <span className="text-[10px]">Visible</span>
+                    <span className="text-[10px]">{config?.browser_is_remote ? "Live View" : "Visible"}</span>
                   </button>
                   <button
                     type="button"
@@ -353,19 +353,26 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                     <EyeOff className="h-4 w-4 mb-1" />
                     <span className="text-[10px]">Headless</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setBrowserMode("cdp")}
-                    className={`flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all ${
-                      browserMode === "cdp"
-                        ? "border-emerald-500 bg-emerald-500/10 text-emerald-400 font-semibold"
-                        : "border-white/5 bg-zinc-950 text-zinc-400 hover:bg-zinc-900"
-                    }`}
-                  >
-                    <Radio className="h-4 w-4 mb-1" />
-                    <span className="text-[10px]">CDP Attach</span>
-                  </button>
+                  {!config?.browser_is_remote && (
+                    <button
+                      type="button"
+                      onClick={() => setBrowserMode("cdp")}
+                      className={`flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all ${
+                        browserMode === "cdp"
+                          ? "border-emerald-500 bg-emerald-500/10 text-emerald-400 font-semibold"
+                          : "border-white/5 bg-zinc-950 text-zinc-400 hover:bg-zinc-900"
+                      }`}
+                    >
+                      <Radio className="h-4 w-4 mb-1" />
+                      <span className="text-[10px]">CDP Attach</span>
+                    </button>
+                  )}
                 </div>
+                {config?.browser_is_remote && (
+                  <p className="text-[10px] leading-relaxed text-zinc-500">
+                    The browser runs on the hosted server. Live View streams it here; it cannot open a desktop window on your device.
+                  </p>
+                )}
               </div>
             </CardContent>
           </Card>

@@ -274,6 +274,41 @@ def test_visible_mode_sets_headless_false():
     assert config.browser_connection_mode == "playwright"
 
 
+@pytest.mark.asyncio
+async def test_youtube_search_uses_results_url_without_search_input():
+    config = AgentConfig(browser_type="chromium", browser_mode="headless")
+    executor = BrowserExecutor(config)
+    mock_page = MagicMock()
+    mock_page.url = "https://www.youtube.com/"
+    mock_page.is_closed = MagicMock(return_value=False)
+    mock_page.evaluate = AsyncMock()
+    mock_page.goto = AsyncMock()
+    mock_results = MagicMock()
+    mock_results.wait_for = AsyncMock()
+    mock_page.locator = MagicMock(return_value=MagicMock(first=mock_results))
+    executor._page = mock_page
+    executor._update_in_page_hud = AsyncMock()
+    executor._capture_and_emit_immediate_frame = AsyncMock()
+
+    await executor._dispatch(
+        ActionObject(
+            action="fill",
+            selector="search_input",
+            value="Ed Sheeran Shape & You",
+        ),
+        timeout=10_000,
+    )
+
+    mock_page.goto.assert_awaited_once_with(
+        "https://www.youtube.com/results?search_query=Ed+Sheeran+Shape+%26+You",
+        wait_until="domcontentloaded",
+        timeout=10_000,
+    )
+    mock_results.wait_for.assert_awaited_once_with(state="visible", timeout=10_000)
+    executor._update_in_page_hud.assert_awaited_once()
+    executor._capture_and_emit_immediate_frame.assert_awaited_once_with("YouTube Search Results")
+
+
 # 13. Headless browser mode sets headless=True
 def test_headless_mode_sets_headless_true():
     config = AgentConfig(browser_mode="headless")

@@ -52,7 +52,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from agent_framework.config import AgentConfig, default_config
+from agent_framework.config import AgentConfig, IS_SERVER, default_config
 from agent_framework.models import ActionObject, PageState, SubTask, VerificationResult
 from agent_framework.modules.browser_executor import (
     BrowserBlockedError,
@@ -324,6 +324,7 @@ async def get_config():
         "reasoning_model": cfg.reasoning_model,
         "browser_mode": cfg.browser_mode,
         "browser_type": cfg.browser_type,
+        "browser_is_remote": IS_SERVER,
         "storage_backend": cfg.storage_backend,
         "available_strategies": [
             {"id": "plan_then_execute", "name": "Plan-then-Execute", "badge": "⚡ Ultra Fast", "desc": "1-shot plan generation with direct execution and checkpoints"},
