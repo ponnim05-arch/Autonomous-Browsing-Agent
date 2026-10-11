@@ -1,0 +1,109 @@
+{
+  "planHash": "c13abcf24f33e7996753306ee7a33b4f08b68e6de79bb298fbe9856bbe4b8561",
+  "phase": "baseline",
+  "recordedAtUtc": "2026-10-11T05:43:48.4195085Z",
+  "retryCount": 0,
+  "resetBaseline": true,
+  "complete": true,
+  "result": {
+    "setupSucceeded": true,
+    "setupDurationMs": 13033,
+    "setupFailureOutput": null,
+    "assertions": [
+      {
+        "name": "tsc-no-emit",
+        "kind": "process",
+        "verificationMethod": "exit-code",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "",
+        "durationMs": 5254
+      },
+      {
+        "name": "tests-pass",
+        "kind": "process",
+        "verificationMethod": "test-results",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n\u003E autonomous-browser-agent-ui@1.0.0 test\r\n\u003E vitest run\r\n\r\n\r\n RUN  v5.0.3 C:/Users/ys770/OneDrive/Desktop/Auto/frontend\r\n\r\n\r\n Test Files  1 passed (1)\r\n      Tests  2 passed (2)\r\n   Start at  11:13:37\r\n   Duration  9.38s (transform 49%, import 28%, worker 13%, tests 9%)\r\n\r\n",
+        "durationMs": 12412,
+        "testResults": {
+          "testFramework": "vitest",
+          "runnerDetectedFrom": "package_json",
+          "testsTotal": 2,
+          "testsPassed": 2,
+          "testsFailed": 0,
+          "testsSkipped": 0,
+          "parseFailed": false
+        }
+      },
+      {
+        "name": "dev-server-serves-home",
+        "kind": "http-probe",
+        "verificationMethod": "http-status",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": null,
+        "outputSample": "HTTP 200\n\u003C!doctype html\u003E\r\n\u003Chtml lang=\u0022en\u0022 class=\u0022dark\u0022\u003E\r\n  \u003Chead\u003E\n    \u003Cscript type=\u0022module\u0022\u003Eimport { injectIntoGlobalHook } from \u0022/@react-refresh\u0022;\ninjectIntoGlobalHook(window);\nwindow.$RefreshReg$ = () =\u003E {};\nwindow.$RefreshSig$ = () =\u003E (type) =\u003E type;\u003C/script\u003E\n\n    \u003Cscript type=\u0022module\u0022 src=\u0022/@vite/client\u0022\u003E\u003C/script\u003E\n\r\n    \u003Cmeta charset=\u0022UTF-8\u0022 /\u003E\r\n    \u003Clink rel=\u0022icon\u0022 type=\u0022image/svg\u002Bxml\u0022 href=\u0022data:image/svg\u002Bxml,\u003Csvg xmlns=\u0027http://www.w3.org/2000/svg\u0027 viewBox=\u00270 0 24 24\u0027 fill=\u0027none\u0027 stroke=\u0027%2310b981\u0027 stroke-width=\u00272\u0027 stroke-linecap=\u0027round\u0027 stroke-linejoin=\u0027round\u0027\u003E\u003Cpolygon points=\u002713 2 3 14 12 14 11 22 21 10 12 10 13 2\u0027/\u003E\u003C/svg\u003E\u0022 /\u003E\r\n    \u003Cmeta name=\u0022viewport\u0022 content=\u0022width=device-width, initial-scale=1.0\u0022 /\u003E\r\n    \u003Ctitle\u003EAutonomous Fast Browser Agent\u003C/title\u003E\r\n    \u003Clink rel=\u0022preconnect\u0022 href=\u0022https://fonts.googleapis.com\u0022\u003E\r\n    \u003Clink rel=\u0022preconnect\u0022 href=\u0022https://fonts.gstatic.com\u0022 crossorigin\u003E\r\n    \u003Clink href=\u0022https://fonts.googleapis.com/css2?family=Plus\u002BJakarta\u002BSans:wght@300;400;500;600;700;800\u0026family=JetBrains\u002BMono:wght@400;500;600\u0026display=swap\u0022 rel=\u0022stylesheet\u0022\u003E\r\n    \u003Cscript\u003E\r\n      try {\r\n        const saved = localStorage.getItem(\u0027theme\u0027);\r\n        if (saved === \u0027light\u0027) {\r\n          document.documentElement.classList.remove(\u0027dark\u0027);\r\n          document.documentElement.classList.add(\u0027light\u0027);\r\n        } else {\r\n          document.documentElement.classList.add(\u0027dark\u0027);\r\n          document.documentElement.classList.remove(\u0027light\u0027);\r\n        }\r\n      } catch (e) {}\r\n    \u003C/script\u003E\r\n    \u003Cscript\u003E\r\n      // Suppress Chromium Windows WebGPU powerPreference warning (crbug.com/369219127)\r\n      try {\r\n        if (typeof navigator !== \u0027undefined\u0027 \u0026\u0026 navigator.gpu \u0026\u0026 navigator.gpu.requestAdapter) {\r\n          const originalRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);\r\n          navigator.gpu.requestAdapter = function(options) {\r\n            if (options \u0026\u0026 \u0027powerPreference\u0027 in options) {\r\n              const { powerPreference, ...rest } = options;\r\n              return originalRequestAdapter(rest);\r\n            }\r\n            return originalRequestAdapter(options);\r\n          };\r\n        }\r\n        const originalWarn = console.warn;\r\n        console.warn = function(...args) {\r\n          if (args[0] \u0026\u0026 typeof args[0] === \u0027string\u0027 \u0026\u0026 (args[0].includes(\u0027crbug.com/369219127\u0027) || args[0].includes(\u0027powerPreference option is currently ignored\u0027))) {\r\n            return;\r\n          }\r\n          originalWarn.apply(console, args);\r\n        };\r\n      } catch (e) {}\r\n    \u003C/script\u003E\r\n  \u003C/head\u003E\r\n  \u003Cbody class=\u0022bg-[#09090b] text-zinc-100 min-h-screen antialiased selection:bg-emerald-500/20 selection:text-emerald-300\u0022\u003E\r\n    \u003Cdiv id=\u0022root\u0022\u003E\u003C/div\u003E\r\n    \u003Cscript type=\u0022module\u0022 src=\u0022/src/main.tsx\u0022\u003E\u003C/script\u003E\r\n  \u003C/body\u003E\r\n\u003C/html\u003E\r\n\n--- server output ---\n\r\n  \u001B[32m\u001B[1mVITE\u001B[22m v6.4.3\u001B[39m  \u001B[2mready in \u001B[0m\u001B[1m467\u001B[22m\u001B[2m\u001B[0m ms\u001B[22m\r\n\r\n  \u001B[32m\u279C\u001B[39m  \u001B[1mLocal\u001B[22m:   \u001B[36mhttp://127.0.0.1:\u001B[1m5173\u001B[22m/\u001B[39m\r\n",
+        "durationMs": 1501
+      }
+    ],
+    "executions": [
+      {
+        "source": "setup[0]",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "ci"
+        ],
+        "cwd": "C:\\Users\\ys770\\OneDrive\\Desktop\\Auto\\frontend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "tsc-no-emit",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npx.CMD",
+        "args": [
+          "tsc",
+          "--noEmit"
+        ],
+        "cwd": "C:\\Users\\ys770\\OneDrive\\Desktop\\Auto\\frontend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "tests-pass",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "test"
+        ],
+        "cwd": "C:\\Users\\ys770\\OneDrive\\Desktop\\Auto\\frontend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "dev-server-serves-home",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\node.EXE",
+        "args": [
+          "node_modules/vite/bin/vite.js",
+          "--host",
+          "127.0.0.1"
+        ],
+        "cwd": "C:\\Users\\ys770\\OneDrive\\Desktop\\Auto\\frontend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      }
+    ]
+  }
+}
