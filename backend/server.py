@@ -383,18 +383,16 @@ async def generate_plan(req: PlanRequest):
 
 @app.post("/api/run")
 async def start_run(req: RunRequest):
-    cfg = AgentConfig()
+    cfg = AgentConfig(
+        browser_mode=req.browser_mode,
+        headless=req.browser_mode == "headless",
+        browser_type=req.browser_type,
+        browser_connection_mode="cdp" if req.browser_mode == "cdp" else "playwright",
+        cdp_endpoint=req.cdp_endpoint or "http://127.0.0.1:9222",
+        reuse_browser=req.keep_browser_open,
+        keep_browser_open=req.keep_browser_open,
+    )
     cfg.experiment_strategy = req.strategy
-    cfg.browser_mode = req.browser_mode
-    cfg.headless = req.browser_mode == "headless"
-    cfg.browser_type = req.browser_type
-    cfg.reuse_browser = req.keep_browser_open
-    cfg.keep_browser_open = req.keep_browser_open
-    if req.browser_mode == "cdp":
-        cfg.browser_connection_mode = "cdp"
-        cfg.cdp_endpoint = req.cdp_endpoint or "http://127.0.0.1:9222"
-    else:
-        cfg.browser_connection_mode = "playwright"
 
     # Determine provider from model
     clean_model = req.model
