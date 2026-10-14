@@ -1,0 +1,52 @@
+{
+  "generatedAt": "2026-10-11T11:00:35+05:30",
+  "generatedOnPlatform": "win32",
+  "projectType": "webapp",
+  "setup": [
+    {
+      "command": "npm",
+      "args": [
+        "ci"
+      ]
+    }
+  ],
+  "assertions": [
+    {
+      "name": "tsc-no-emit",
+      "kind": "process",
+      "command": "npx",
+      "args": [
+        "tsc",
+        "--noEmit"
+      ],
+      "verificationMethod": "exit-code",
+      "expected": "0",
+      "timeoutSeconds": 180
+    },
+    {
+      "name": "tests-pass",
+      "kind": "process",
+      "command": "npm",
+      "args": [
+        "test"
+      ],
+      "verificationMethod": "test-results",
+      "expected": "0",
+      "timeoutSeconds": 300
+    },
+    {
+      "name": "dev-server-serves-home",
+      "kind": "http-probe",
+      "startCommand": "node",
+      "startArgs": [
+        "node_modules/vite/bin/vite.js",
+        "--host",
+        "127.0.0.1"
+      ],
+      "url": "http://127.0.0.1:5173/",
+      "verificationMethod": "http-status",
+      "expected": "200",
+      "timeoutSeconds": 120
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { apiUrl } from "@/lib/api";
 import { Play, ListTree, Sparkles, Shield, Compass, Cpu, Layers, CheckCircle2, ArrowRight, Eye, EyeOff, Radio } from "lucide-react";
 import { HandwritingText } from "@/components/ui/handwriting-text";
@@ -28,6 +28,13 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
   const [isPlanning, setIsPlanning] = useState(false);
   const [generatedPlan, setGeneratedPlan] = useState<any>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  const planRequestRef = useRef(0);
+
+  const invalidatePlan = () => {
+    planRequestRef.current += 1;
+    setGeneratedPlan(null);
+    setPlanError(null);
+  };
 
   const sampleGoals = [
     "Find the cheapest laptop under Rs.60,000 with 16GB RAM on Flipkart",
@@ -76,24 +83,28 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
 
   const handleGeneratePlan = async () => {
     if (!goal.trim()) return;
+    const requestId = ++planRequestRef.current;
+    const requestedGoal = goal.trim();
+    const requestedModel = model;
+    const requestedStrategy = strategy;
     setIsPlanning(true);
     setPlanError(null);
     try {
       const res = await fetch(apiUrl("/api/plan"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: jsonBody({ goal, model, strategy }),
+        body: jsonBody({ goal: requestedGoal, model: requestedModel, strategy: requestedStrategy }),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || "Failed to generate plan");
       }
       const data = await res.json();
-      setGeneratedPlan(data);
+      if (requestId === planRequestRef.current) setGeneratedPlan(data);
     } catch (err: any) {
-      setPlanError(err.message);
+      if (requestId === planRequestRef.current) setPlanError(err.message);
     } finally {
-      setIsPlanning(false);
+      if (requestId === planRequestRef.current) setIsPlanning(false);
     }
   };
 
@@ -160,7 +171,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                   <BorderBeam size="md" colorVariant="colorful" strength={0.7} className="w-full" theme={theme}>
                     <textarea
                       value={goal}
-                      onChange={(e) => setGoal(e.target.value)}
+                      onChange={(e) => {
+                        invalidatePlan();
+                        setGoal(e.target.value);
+                      }}
                       placeholder="e.g. Find the cheapest laptop under Rs.60,000 with 16GB RAM on Flipkart"
                       rows={4}
                       className="w-full rounded-xl border border-white/10 bg-zinc-950/80 p-4 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 transition-all font-sans block"
@@ -175,7 +189,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                     {sampleGoals.map((sample, idx) => (
                       <button
                         key={idx}
-                        onClick={() => setGoal(sample)}
+                        onClick={() => {
+                          invalidatePlan();
+                          setGoal(sample);
+                        }}
                         className="rounded-lg border border-white/5 bg-zinc-900/60 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-400 hover:bg-zinc-800/60 transition-all text-left"
                       >
                         {sample}
@@ -277,7 +294,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
               {strategies.map((s) => (
                 <div
                   key={s.id}
-                  onClick={() => setStrategy(s.id)}
+                  onClick={() => {
+                    invalidatePlan();
+                    setStrategy(s.id);
+                  }}
                   className={`cursor-pointer rounded-xl border p-3 transition-all ${
                     strategy === s.id
                       ? "border-emerald-500/50 bg-emerald-500/10 shadow-lg shadow-emerald-500/5"
@@ -310,7 +330,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                 <label className="text-zinc-400 font-medium">LLM Model Tier</label>
                 <select
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  onChange={(e) => {
+                    invalidatePlan();
+                    setModel(e.target.value);
+                  }}
                   className="w-full rounded-xl border border-white/10 bg-zinc-950 p-2.5 text-xs text-zinc-100 focus:border-emerald-500 focus:outline-none"
                 >
                   {config?.available_models?.map((m: any) => (
@@ -328,7 +351,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
               {/* Browser Mode */}
               <div className="space-y-1.5">
                 <label className="text-zinc-400 font-medium">Browser Mode</label>
-                <div className="grid grid-cols-3 gap-2">
+                <div className={`grid ${config?.browser_is_remote ? "grid-cols-2" : "grid-cols-3"} gap-2`}>
                   <button
                     type="button"
                     onClick={() => setBrowserMode("visible")}
@@ -339,7 +362,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                     }`}
                   >
                     <Eye className="h-4 w-4 mb-1" />
-                    <span className="text-[10px]">Visible</span>
+                    <span className="text-[10px]">{config?.browser_is_remote ? "Live View" : "Visible"}</span>
                   </button>
                   <button
                     type="button"
@@ -353,19 +376,26 @@ export const HomeView: React.FC<HomeViewProps> = ({ onStartRun, config }) => {
                     <EyeOff className="h-4 w-4 mb-1" />
                     <span className="text-[10px]">Headless</span>
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setBrowserMode("cdp")}
-                    className={`flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all ${
-                      browserMode === "cdp"
-                        ? "border-emerald-500 bg-emerald-500/10 text-emerald-400 font-semibold"
-                        : "border-white/5 bg-zinc-950 text-zinc-400 hover:bg-zinc-900"
-                    }`}
-                  >
-                    <Radio className="h-4 w-4 mb-1" />
-                    <span className="text-[10px]">CDP Attach</span>
-                  </button>
+                  {!config?.browser_is_remote && (
+                    <button
+                      type="button"
+                      onClick={() => setBrowserMode("cdp")}
+                      className={`flex flex-col items-center justify-center rounded-xl border p-2 text-center transition-all ${
+                        browserMode === "cdp"
+                          ? "border-emerald-500 bg-emerald-500/10 text-emerald-400 font-semibold"
+                          : "border-white/5 bg-zinc-950 text-zinc-400 hover:bg-zinc-900"
+                      }`}
+                    >
+                      <Radio className="h-4 w-4 mb-1" />
+                      <span className="text-[10px]">CDP Attach</span>
+                    </button>
+                  )}
                 </div>
+                {config?.browser_is_remote && (
+                  <p className="text-[10px] leading-relaxed text-zinc-500">
+                    The browser runs on the hosted server. Live View streams it here; it cannot open a desktop window on your device.
+                  </p>
+                )}
               </div>
             </CardContent>
           </Card>

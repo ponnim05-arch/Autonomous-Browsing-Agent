@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 import json
 import logging
 import math
@@ -41,7 +42,7 @@ try:
 except Exception:
     pass
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -52,7 +53,7 @@ SRC_DIR = ROOT_DIR / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from agent_framework.config import AgentConfig, default_config
+from agent_framework.config import AgentConfig, IS_SERVER, default_config
 from agent_framework.models import ActionObject, PageState, SubTask, VerificationResult
 from agent_framework.modules.browser_executor import (
     BrowserBlockedError,
@@ -95,9 +96,10 @@ app.add_middleware(
 )
 
 # Ensure runs/screenshots directory exists and is mounted
-RUNS_DIR = ROOT_DIR / "logs" / "runs"
+APP_DATA_DIR = Path(os.getenv("APP_DATA_DIR", str(ROOT_DIR))).resolve()
+RUNS_DIR = APP_DATA_DIR / "logs" / "runs"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
-DATA_SCREENSHOTS_DIR = ROOT_DIR / "data" / "screenshots"
+DATA_SCREENSHOTS_DIR = APP_DATA_DIR / "data" / "screenshots"
 DATA_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 SCREENSHOTS_DIR = RUNS_DIR  # Primary screenshot location for agent runs
 
@@ -288,6 +290,7 @@ class PlanRequest(BaseModel):
     goal: str
     model: Optional[str] = None
     provider: Optional[str] = None
+    strategy: str = "plan_then_execute"
 
 
 class RunRequest(BaseModel):
@@ -303,10 +306,36 @@ class RunRequest(BaseModel):
 
 # ── REST Endpoints ────────────────────────────────────────────────────────────
 
+def _provider_for_model(model: str) -> str:
+    normalized = model.lower()
+    if normalized.startswith(("meta/", "mistralai/", "nvidia/", "openai/gpt-oss")):
+        return "nvidia"
+    if normalized.startswith(("gpt-", "o1", "o3")) or normalized == "gpt-4o":
+        return "openai"
+    if normalized.startswith("claude"):
+        return "anthropic"
+    if normalized.startswith("gemini"):
+        return "gemini"
+    raise HTTPException(status_code=400, detail=f"Unsupported model: {model}")
+
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok", "timestamp": time.time()}
 
+
+@app.post("/api/desktop/shutdown")
+async def desktop_shutdown(request: Request):
+    token = os.getenv("DESKTOP_CONTROL_TOKEN", "")
+    supplied = request.headers.get("x-desktop-control-token", "")
+    if not token or not hmac.compare_digest(token, supplied):
+        raise HTTPException(status_code=403, detail="Desktop shutdown is not authorized")
+
+    server = getattr(app.state, "desktop_uvicorn_server", None)
+    if server is None:
+        raise HTTPException(status_code=503, detail="Desktop server controller is unavailable")
+    server.should_exit = True
+    return {"status": "shutting_down"}
 
 
 @app.get("/api/config")
@@ -324,6 +353,7 @@ async def get_config():
         "reasoning_model": cfg.reasoning_model,
         "browser_mode": cfg.browser_mode,
         "browser_type": cfg.browser_type,
+        "browser_is_remote": IS_SERVER,
         "storage_backend": cfg.storage_backend,
         "available_strategies": [
             {"id": "plan_then_execute", "name": "Plan-then-Execute", "badge": "⚡ Ultra Fast", "desc": "1-shot plan generation with direct execution and checkpoints"},
@@ -346,6 +376,172 @@ async def get_config():
     }
 
 
+class ApiKeysUpdate(BaseModel):
+    """Schema for updating API keys via the settings page."""
+    nvidia_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    serpapi_key: Optional[str] = None
+    google_cse_key: Optional[str] = None
+    google_cse_cx: Optional[str] = None
+    bing_search_key: Optional[str] = None
+
+
+def _mask_key(value: str | None) -> str:
+    """Mask an API key, showing only the first 8 and last 4 characters."""
+    if not value:
+        return ""
+    v = value.strip()
+    if len(v) <= 12:
+        return "*" * len(v) if v else ""
+    return v[:8] + "*" * (len(v) - 12) + v[-4:]
+
+
+@app.get("/api/settings/keys")
+async def get_api_keys():
+    """Return current API keys in masked form, plus links to obtain them."""
+    cfg = AgentConfig()
+    return {
+        "keys": {
+            "nvidia_api_key": _mask_key(cfg.nvidia_api_key),
+            "gemini_api_key": _mask_key(cfg.gemini_api_key),
+            "openai_api_key": _mask_key(cfg.openai_api_key),
+            "anthropic_api_key": _mask_key(cfg.anthropic_api_key),
+            "serpapi_key": _mask_key(cfg.serpapi_key),
+            "google_cse_key": _mask_key(cfg.google_cse_key),
+            "google_cse_cx": _mask_key(cfg.google_cse_cx),
+            "bing_search_key": _mask_key(cfg.bing_search_key),
+        },
+        "providers": [
+            {
+                "id": "nvidia_api_key",
+                "name": "NVIDIA NIM",
+                "description": "Access Llama, Nemotron, and other models via NVIDIA AI Foundation",
+                "link": "https://build.nvidia.com/explore/discover",
+                "link_label": "Get NVIDIA API Key",
+                "env_var": "NVIDIA_API_KEY",
+                "category": "llm",
+            },
+            {
+                "id": "gemini_api_key",
+                "name": "Google Gemini",
+                "description": "Access Gemini 2.5 Flash and Pro models from Google AI Studio",
+                "link": "https://aistudio.google.com/apikey",
+                "link_label": "Get Gemini API Key",
+                "env_var": "GEMINI_API_KEY",
+                "category": "llm",
+            },
+            {
+                "id": "openai_api_key",
+                "name": "OpenAI",
+                "description": "Access GPT-4o and other OpenAI models",
+                "link": "https://platform.openai.com/api-keys",
+                "link_label": "Get OpenAI API Key",
+                "env_var": "OPENAI_API_KEY",
+                "category": "llm",
+            },
+            {
+                "id": "anthropic_api_key",
+                "name": "Anthropic Claude",
+                "description": "Access Claude 3.7 Sonnet and other Anthropic models",
+                "link": "https://console.anthropic.com/settings/keys",
+                "link_label": "Get Anthropic API Key",
+                "env_var": "ANTHROPIC_API_KEY",
+                "category": "llm",
+            },
+            {
+                "id": "serpapi_key",
+                "name": "SerpAPI",
+                "description": "Google search results API (optional, falls back to DuckDuckGo)",
+                "link": "https://serpapi.com/manage-api-key",
+                "link_label": "Get SerpAPI Key",
+                "env_var": "SERPAPI_KEY",
+                "category": "search",
+            },
+            {
+                "id": "google_cse_key",
+                "name": "Google Custom Search",
+                "description": "Google Programmable Search Engine API key",
+                "link": "https://programmablesearchengine.google.com/controlpanel/all",
+                "link_label": "Get Google CSE Key",
+                "env_var": "GOOGLE_CSE_KEY",
+                "category": "search",
+            },
+            {
+                "id": "google_cse_cx",
+                "name": "Google CSE ID",
+                "description": "Your Custom Search Engine ID (cx parameter)",
+                "link": "https://programmablesearchengine.google.com/controlpanel/all",
+                "link_label": "Get Search Engine ID",
+                "env_var": "GOOGLE_CSE_CX",
+                "category": "search",
+            },
+            {
+                "id": "bing_search_key",
+                "name": "Bing Search",
+                "description": "Microsoft Bing Search API key",
+                "link": "https://www.microsoft.com/en-us/bing/apis/bing-web-search-api",
+                "link_label": "Get Bing Search Key",
+                "env_var": "BING_SEARCH_KEY",
+                "category": "search",
+            },
+        ],
+    }
+
+
+@app.put("/api/settings/keys")
+async def update_api_keys(body: ApiKeysUpdate):
+    """Save updated API keys to the .env file and reload them in-process."""
+    from agent_framework.config import ENV_PATH_ROOT, ENV_PATH_BACKEND, _reload_env
+
+    env_path = ENV_PATH_ROOT if ENV_PATH_ROOT.exists() else ENV_PATH_BACKEND
+    if not env_path.exists():
+        env_path = ENV_PATH_ROOT
+        env_path.write_text("# Auto-generated by settings UI\n")
+
+    content = env_path.read_text(encoding="utf-8")
+    updates = body.dict(exclude_none=True)
+    if not updates:
+        return {"status": "no_changes"}
+
+    env_var_map = {
+        "nvidia_api_key": "NVIDIA_API_KEY",
+        "gemini_api_key": "GEMINI_API_KEY",
+        "openai_api_key": "OPENAI_API_KEY",
+        "anthropic_api_key": "ANTHROPIC_API_KEY",
+        "serpapi_key": "SERPAPI_KEY",
+        "google_cse_key": "GOOGLE_CSE_KEY",
+        "google_cse_cx": "GOOGLE_CSE_CX",
+        "bing_search_key": "BING_SEARCH_KEY",
+    }
+
+    lines = content.splitlines()
+    for field_name, value in updates.items():
+        # Skip masked values (user didn't change them)
+        if "*" in value:
+            continue
+        env_key = env_var_map.get(field_name)
+        if not env_key:
+            continue
+        # Update in-process environment
+        os.environ[env_key] = value
+        # Update .env file
+        found = False
+        for i, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith(f"{env_key}=") or stripped.startswith(f"# {env_key}="):
+                lines[i] = f"{env_key}={value}"
+                found = True
+                break
+        if not found:
+            lines.append(f"{env_key}={value}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _reload_env()
+    return {"status": "saved", "updated": list(updates.keys())}
+
+
 @app.post("/api/plan")
 async def generate_plan(req: PlanRequest):
     if not req.goal.strip():
@@ -354,6 +550,8 @@ async def generate_plan(req: PlanRequest):
     if req.model:
         cfg.fast_model = req.model
         cfg.llm_model = req.model
+        cfg.llm_provider = _provider_for_model(req.model)
+    cfg.experiment_strategy = req.strategy
 
     try:
         planner = UnifiedPlanner(cfg)
@@ -383,29 +581,20 @@ async def generate_plan(req: PlanRequest):
 
 @app.post("/api/run")
 async def start_run(req: RunRequest):
-    cfg = AgentConfig()
+    cfg = AgentConfig(
+        browser_mode=req.browser_mode,
+        headless=req.browser_mode == "headless",
+        browser_type=req.browser_type,
+        browser_connection_mode="cdp" if req.browser_mode == "cdp" else "playwright",
+        cdp_endpoint=req.cdp_endpoint or "http://127.0.0.1:9222",
+        reuse_browser=req.keep_browser_open,
+        keep_browser_open=req.keep_browser_open,
+    )
     cfg.experiment_strategy = req.strategy
-    cfg.browser_mode = req.browser_mode
-    cfg.headless = req.browser_mode == "headless"
-    cfg.browser_type = req.browser_type
-    cfg.reuse_browser = req.keep_browser_open
-    cfg.keep_browser_open = req.keep_browser_open
-    if req.browser_mode == "cdp":
-        cfg.browser_connection_mode = "cdp"
-        cfg.cdp_endpoint = req.cdp_endpoint or "http://127.0.0.1:9222"
-    else:
-        cfg.browser_connection_mode = "playwright"
 
     # Determine provider from model
     clean_model = req.model
-    if any(k in clean_model for k in ("meta/", "mistralai/", "nvidia", "openai/gpt-oss")):
-        cfg.llm_provider = "nvidia"
-    elif any(k in clean_model for k in ("gpt-4", "o3", "o1")):
-        cfg.llm_provider = "openai"
-    elif "claude" in clean_model:
-        cfg.llm_provider = "anthropic"
-    else:
-        cfg.llm_provider = "gemini"
+    cfg.llm_provider = _provider_for_model(clean_model)
 
     cfg.llm_model = clean_model
     cfg.fast_model = clean_model
@@ -1056,9 +1245,6 @@ def _verify_goal_heuristic(goal: str, final_url: str | None, final_title: str | 
     }
     for site_name, is_on_site in site_checks.items():
         if site_name in goal_lower and not is_on_site:
-            # Goal mentions a site but we're not on it
-            if steps_succeeded == total_steps:
-                return True, f"All {total_steps} actions completed. Final page: {final_title or final_url}"
             return False, f"Goal mentions '{site_name}' but final page is on {final_url}"
 
     # If all steps succeeded, check for obvious failure signals
@@ -1382,6 +1568,13 @@ async def execute_agent_run(
             del ws_manager.run_cancel_events[run_id]
         ws_manager.run_sessions.pop(run_id, None)
         ws_manager.active_browsers.pop(run_id, None)
+
+
+_frontend_dist_dir = Path(
+    os.getenv("APP_FRONTEND_DIST", str(ROOT_DIR / "frontend_dist"))
+).resolve()
+if _frontend_dist_dir.is_dir():
+    app.mount("/", StaticFiles(directory=str(_frontend_dist_dir), html=True), name="desktop_frontend")
 
 
 if __name__ == "__main__":

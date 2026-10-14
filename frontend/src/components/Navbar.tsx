@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Zap, Activity, BarChart3, Search, Terminal, Globe, Cpu, Server, CheckCircle2, AlertCircle, Sun, Moon } from "lucide-react";
+import { Zap, Activity, BarChart3, Search, Terminal, Globe, Cpu, Server, CheckCircle2, AlertCircle, Sun, Moon, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useTheme } from "@/lib/theme";
@@ -27,6 +27,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: "agent", label: "Agent View", icon: Activity },
     { id: "dashboard", label: "Dashboard", icon: BarChart3 },
     { id: "inspector", label: "Run Inspector", icon: Search },
+    { id: "settings", label: "Settings", icon: Settings },
   ];
 
   return (

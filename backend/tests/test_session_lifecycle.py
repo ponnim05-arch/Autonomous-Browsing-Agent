@@ -18,6 +18,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import server  # noqa: E402
+import agent_framework.config as config_module  # noqa: E402
 
 
 _SCHEMA = """
@@ -182,3 +183,33 @@ async def test_run_binding_records_session(fresh_session):
     assert server.ws_manager.run_sessions["bound_run"] == fresh_session
     server.ws_manager.run_cancel_events.clear()
     server.ws_manager.run_sessions.clear()
+
+
+@pytest.mark.asyncio
+async def test_start_run_keeps_server_browser_headless(monkeypatch):
+    monkeypatch.setattr(config_module, "IS_SERVER", True)
+    captured_configs = []
+
+    class FakeExperimentLogger:
+        def __init__(self, config):
+            captured_configs.append(config)
+
+        async def start_run(self, goal, strategy):
+            return "server_headless_run"
+
+    async def fake_execute_agent_run(**kwargs):
+        return None
+
+    monkeypatch.setattr(server, "ExperimentLogger", FakeExperimentLogger)
+    monkeypatch.setattr(server, "execute_agent_run", fake_execute_agent_run)
+
+    result = await server.start_run(
+        server.RunRequest(goal="play a song", browser_mode="visible", browser_type="chromium")
+    )
+    await asyncio.sleep(0)
+    server.ws_manager.run_cancel_events.pop("server_headless_run", None)
+    server.ws_manager.run_sessions.pop("server_headless_run", None)
+
+    assert result == {"run_id": "server_headless_run", "status": "started"}
+    assert captured_configs[0].browser_mode == "visible"
+    assert captured_configs[0].headless is True
