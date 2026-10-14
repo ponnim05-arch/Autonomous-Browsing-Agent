@@ -5,6 +5,7 @@ import { HomeView } from "@/views/HomeView";
 import { AgentView } from "@/views/AgentView";
 import { DashboardView } from "@/views/DashboardView";
 import { InspectorView } from "@/views/InspectorView";
+import { SettingsView } from "@/views/SettingsView";
 
 export function App() {
   const [activeTab, setActiveTab] = useState("home");
@@ -340,6 +341,7 @@ export function App() {
         )}
         {activeTab === "dashboard" && <DashboardView />}
         {activeTab === "inspector" && <InspectorView />}
+        {activeTab === "settings" && <SettingsView />}
       </main>
     </div>
   );

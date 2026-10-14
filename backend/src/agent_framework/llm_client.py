@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -29,6 +29,7 @@ class LLMClient:
     def __init__(self, config: AgentConfig = default_config):
         self.config = config
         self._provider = config.llm_provider.lower()
+        self._nvidia_clients: dict[str, Any] = {}
         # Performance tracking
         self._call_count = 0
         self._fast_call_count = 0
@@ -97,6 +98,7 @@ class LLMClient:
                 model=self.config.fast_model,
                 max_tokens=self.config.fast_model_max_tokens,
                 thinking=False,
+                api_key=self._api_key_for_model(self.config.fast_model),
             )
         except Exception as e:
             logger.warning(f"[LLM] Fast model failed: {e}. Falling back to default.")
@@ -119,6 +121,7 @@ class LLMClient:
                 model=self.config.reasoning_model,
                 max_tokens=self.config.reasoning_model_max_tokens,
                 thinking=self.config.llm_thinking,
+                api_key=self._api_key_for_model(self.config.reasoning_model),
             )
         except Exception as e:
             logger.warning(f"[LLM] Reasoning model failed: {e}. Falling back to default.")
@@ -126,21 +129,28 @@ class LLMClient:
 
     # ── NVIDIA (DeepSeek & OpenAI-compatible) ─────────────────────
 
-    def _get_nvidia_client(self):
+    def _api_key_for_model(self, model: str) -> str:
+        if model == self.config.fast_model and self.config.nvidia_fast_api_key:
+            return self.config.nvidia_fast_api_key
+        if model == self.config.reasoning_model and self.config.nvidia_reasoning_api_key:
+            return self.config.nvidia_reasoning_api_key
+        return self.config.nvidia_api_key
+
+    def _get_nvidia_client(self, api_key: str | None = None):
         from openai import AsyncOpenAI
 
-        api_key = self.config.nvidia_api_key or self.config.openai_api_key
-        if not api_key:
+        resolved_api_key = api_key or self.config.nvidia_api_key or self.config.openai_api_key
+        if not resolved_api_key:
             raise LLMError("NVIDIA_API_KEY is not set.")
 
-        if not hasattr(self, "_nvidia_client") or self._nvidia_client is None:
-            self._nvidia_client = AsyncOpenAI(
+        if resolved_api_key not in self._nvidia_clients:
+            self._nvidia_clients[resolved_api_key] = AsyncOpenAI(
                 base_url=self.config.nvidia_base_url,
-                api_key=api_key,
+                api_key=resolved_api_key,
                 default_headers={"Accept": "application/json"},
                 timeout=45.0,
             )
-        return self._nvidia_client
+        return self._nvidia_clients[resolved_api_key]
 
     @retry(
         stop=stop_after_attempt(3),
@@ -150,10 +160,10 @@ class LLMClient:
     )
     async def _call_nvidia_model(
         self, prompt: str, temperature: float, *,
-        model: str, max_tokens: int, thinking: bool = False,
+        model: str, max_tokens: int, thinking: bool = False, api_key: str | None = None,
     ) -> tuple[str, int]:
         """Call NVIDIA API with explicit model and token limit."""
-        client = self._get_nvidia_client()
+        client = self._get_nvidia_client(api_key)
 
         kwargs: dict = {
             "model": model,
@@ -202,8 +212,8 @@ class LLMClient:
         reraise=True,
     )
     async def _call_nvidia(self, prompt: str, temperature: float) -> tuple[str, int]:
-        client = self._get_nvidia_client()
         model_name = self.config.llm_model
+        client = self._get_nvidia_client(self._api_key_for_model(model_name))
 
         kwargs: dict = {
             "model": model_name,

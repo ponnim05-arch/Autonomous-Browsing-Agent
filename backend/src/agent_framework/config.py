@@ -192,6 +192,16 @@ class AgentConfig:
         return os.getenv("NVIDIA_API_KEY", "")
 
     @property
+    def nvidia_fast_api_key(self) -> str:
+        _reload_env()
+        return os.getenv("NVIDIA_FAST_API_KEY", "")
+
+    @property
+    def nvidia_reasoning_api_key(self) -> str:
+        _reload_env()
+        return os.getenv("NVIDIA_REASONING_API_KEY", "")
+
+    @property
     def nvidia_base_url(self) -> str:
         _reload_env()
         return os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
