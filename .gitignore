@@ -66,7 +66,7 @@ frontend/dist/
 frontend/build/
 *.tsbuildinfo
 desktop/node_modules/
-desktop/release/
+
 backend/build/
 backend/dist/
 backend/*.spec
